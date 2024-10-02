@@ -1,0 +1,12 @@
+name: template
+channels:
+  - conda-forge
+dependencies:
+  - transformers=4.44.2
+  - pytorch-lightning=2.1.2
+  - pandas=2.1.3
+  - wandb=0.17.1
+  - python-dotenv=0.21.0
+  - pytorch=2.1.0
+  - matplotlib=3.7.1
+  - ipykernel=6.29.5

@@ -1,0 +1,6 @@
+*.tar.gz
+data/
+.env
+config.json
+__pycache__/
+experiments/
