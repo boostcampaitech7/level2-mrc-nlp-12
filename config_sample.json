@@ -1,0 +1,14 @@
+{
+    "max_epochs": 1,
+    "learning_rate": 0.001,
+    "model_name": "klue/roberta-small",
+    "batch_size": 16,
+    "shuffle": true,
+    "train_path": "data_sample/train_sample.csv",
+    "dev_path": "data_sample/validate_sample.csv",
+    "test_path": "data_sample/validate_sample.csv",
+    "predict_path": "data_sample/test_sample.csv",
+    "num_workers": 1,
+    "do_optimize": false,
+    "n_trials": 1
+}
