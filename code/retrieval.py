@@ -4,6 +4,7 @@ import pickle
 import time
 import random
 import torch
+from torch.utils.data import DataLoader
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union
 
@@ -11,7 +12,8 @@ import faiss
 import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer 
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from tqdm.auto import tqdm 
 
 # 추가한 코드
@@ -350,6 +352,153 @@ class SparseRetrieval:
         D, I = self.indexer.search(q_embs, k)
 
         return D.tolist(), I.tolist()
+
+class DenseRetrieval: 
+    def __init__(
+        self, 
+        model_name_or_path: str,
+        data_path: Optional[str] = "../data/", 
+        context_path: Optional[str] = "wikipedia_documents.json",
+        batch_size: int = 16, 
+        max_length: int = 256, 
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ): 
+        self.device = device 
+        self.batch_size = batch_size
+        self.max_length = max_length 
+
+        # 모델과 토크나이저 로드 
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path) 
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path) 
+        self.model.to(self.device) 
+
+        # 데이터를 파일에서 로드 
+        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f: 
+            wiki = json.load(f) 
+        self.contexts = list(dict.fromkeys([v["text"] for v in wiki.values()]))
+
+    def encode(self, query_or_dataset: Union[str, List[str], Dataset], context: Optional[str] = None) -> Union[torch.Tensor, List[torch.Tensor]]:
+        """쿼리와 문서를 인코딩 (단일 쿼리, 다수 쿼리, Dataset 모두 처리)"""
+
+        if isinstance(query_or_dataset, str):
+            # 단일 쿼리 처리
+            inputs = self.tokenizer(
+                query_or_dataset, 
+                context if context else self.contexts,  # 문서 리스트 또는 하나의 문서
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+                return_tensors="pt"
+            )
+        elif isinstance(query_or_dataset, list):
+            # 다수의 쿼리 처리
+            inputs = self.tokenizer(
+                query_or_dataset,
+                context if context else [self.contexts for _ in query_or_dataset],  # 각 쿼리에 대해 문서 리스트 반복
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+                return_tensors="pt"
+            )
+        elif isinstance(query_or_dataset, Dataset):
+            # Dataset 처리 (여기서 context는 데이터셋 내부에 포함됨)
+            inputs = self.tokenizer(
+                query_or_dataset["question"],
+                query_or_dataset["context"],
+                truncation=True,
+                padding="max_length",
+                max_length=self.max_length,
+                return_tensors="pt"
+            )
+        else:
+            raise ValueError("query_or_dataset는 str, List[str] 또는 Dataset 타입이어야 합니다.")
+        
+        return inputs
+
+    def train(self, data_path: str, epochs: int = 3, learning_rate: float = 5e-5):
+        """DPR 모델 학습 - Wikipedia JSON 파일을 기반으로 학습"""
+        
+        # JSON 파일 로드
+        with open(os.path.join(data_path, 'wikipedia_documents.json'), 'r', encoding='utf-8') as f:
+            wiki_data = json.load(f)
+
+        # 쿼리와 문서 추출
+        queries = [v['query'] for v in wiki_data.values()]
+        contexts = [v['context'] for v in wiki_data.values()]
+        
+        # 배치 데이터 생성
+        dataset = [{'query': q, 'context': c} for q, c in zip(queries, contexts)]
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
+        self.model.train()
+
+        for epoch in range(epochs):
+            epoch_loss = 0
+            for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}"):
+                # In-Batch Negative 샘플 생성
+                positive_examples, negative_examples = self.prepare_in_batch_negative(batch)
+
+                # 긍정 쌍과 음성 쌍의 로스 계산
+                positive_loss = self._compute_loss(positive_examples, is_positive=True)
+                negative_loss = self._compute_loss(negative_examples, is_positive=False)
+
+                # 최종 손실 계산 및 역전파
+                loss = positive_loss + negative_loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
+                epoch_loss += loss.item()
+
+            print(f"Epoch {epoch+1} Loss: {epoch_loss / len(dataloader)}")
+
+    def retrieve(self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 5) -> Union[Tuple[List, List], pd.DataFrame]:
+        """DPR로 상위 k개의 문서 검색 (단일 쿼리 및 다수 쿼리 모두 처리 가능)"""
+        
+        self.model.eval()  # 모델을 평가 모드로 설정
+        
+        if isinstance(query_or_dataset, str):
+            # 단일 쿼리 처리
+            scores = []
+            for context in tqdm(self.contexts, desc="Retrieving"):
+                inputs = self.encode(query_or_dataset, context)  # 단일 쿼리와 문서 인코딩
+                with torch.no_grad():
+                    outputs = self.model(**inputs.to(self.device))
+                    score = outputs.logits.squeeze().item()
+                    scores.append(score)
+
+            topk_indices = np.argsort(scores)[::-1][:topk]
+            return [self.contexts[i] for i in topk_indices], [scores[i] for i in topk_indices]
+        
+        elif isinstance(query_or_dataset, Dataset):
+            # 다수의 쿼리 처리 (Dataset)
+            total_results = []
+            
+            for query in tqdm(query_or_dataset["question"], desc="Retrieving for multiple queries"):
+                scores = []
+                for context in self.contexts:
+                    inputs = self.encode(query, context)  # 다수의 쿼리 인코딩
+                    with torch.no_grad():
+                        outputs = self.model(**inputs.to(self.device))
+                        score = outputs.logits.squeeze().item()
+                        scores.append(score)
+
+                topk_indices = np.argsort(scores)[::-1][:topk]
+                topk_contexts = [self.contexts[i] for i in topk_indices]
+                topk_scores = [scores[i] for i in topk_indices]
+                
+                total_results.append({
+                    "query": query,
+                    "topk_contexts": topk_contexts,
+                    "topk_scores": topk_scores,
+                })
+            
+            # DataFrame 형태로 반환
+            return pd.DataFrame(total_results)
+
+        else:
+            raise ValueError("query_or_dataset는 str 또는 Dataset이어야 합니다.")
 
 if __name__ == "__main__":
 
