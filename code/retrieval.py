@@ -96,7 +96,7 @@ class SparseRetrieval:
             print("Embedding pickle load.")
         else:
             print("Build passage embedding")
-            self.p_embedding = self.tfidfv.fit_transform(self.contexts)
+            self.p_embedding = self.tfidfv.fit_transform(tqdm(self.contexts, desc="TF-IDF fitting"))
             print(self.p_embedding.shape)
             with open(emd_path, "wb") as file:
                 pickle.dump(self.p_embedding, file)
@@ -389,19 +389,20 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help=""
+        "--dataset_name", metavar="./data/train_dataset", type=str, help="", default="../data/train_dataset"
     )
     parser.add_argument(
         "--model_name_or_path",
-        metavar="bert-base-multilingual-cased",
+        metavar="snumin44/biencoder-ko-bert-question",
         type=str,
-        help="",
+        help="", 
+        default="snumin44/biencoder-ko-bert-question",
     )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="")
+    parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
     parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help=""
+        "--context_path", metavar="wikipedia_documents", type=str, help="", default="wikipedia_documents.json"
     )
-    parser.add_argument("--use_faiss", metavar=False, type=bool, help="")
+    parser.add_argument("--use_faiss", metavar=False, type=bool, help="", default=False)
 
     args = parser.parse_args()
 
@@ -435,14 +436,16 @@ if __name__ == "__main__":
             scores, indices = retriever.retrieve_faiss(query)
 
         # test bulk
-        with timer("bulk query by exhaustive search"):
+        with timer("bulk query by exhaustive search"): 
+            retriever.get_sparse_embedding()
             df = retriever.retrieve_faiss(full_ds)
             df["correct"] = df["original_context"] == df["context"]
 
             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
     else:
-        with timer("bulk query by exhaustive search"):
+        with timer("bulk query by exhaustive search"): 
+            retriever.get_sparse_embedding()
             df = retriever.retrieve(full_ds)
             df["correct"] = df["original_context"] == df["context"]
             print(
