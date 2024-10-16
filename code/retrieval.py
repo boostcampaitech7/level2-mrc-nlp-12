@@ -3,6 +3,7 @@ import os
 import pickle
 import time
 import random
+import torch
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union
 
@@ -11,7 +12,11 @@ import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
 from sklearn.feature_extraction.text import TfidfVectorizer
-from tqdm.auto import tqdm
+from tqdm.auto import tqdm 
+
+# 추가한 코드
+from rank_bm25 import BM25Okapi
+
 
 seed = 2024
 random.seed(seed) # python random seed 고정
@@ -65,44 +70,12 @@ class SparseRetrieval:
         print(f"Lengths of unique contexts : {len(self.contexts)}")
         self.ids = list(range(len(self.contexts)))
 
-        # Transform by vectorizer
-        self.tfidfv = TfidfVectorizer(
-            tokenizer=tokenize_fn, ngram_range=(1, 2), max_features=50000,
-        )
+        # BM250kapi에 사용될 토크나이즈된 텍스트로 변환 
+        print("Tokenizing contexts for BM25...") 
+        self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)]
 
-        self.p_embedding = None  # get_sparse_embedding()로 생성합니다
-        self.indexer = None  # build_faiss()로 생성합니다.
-
-    def get_sparse_embedding(self) -> NoReturn:
-
-        """
-        Summary:
-            Passage Embedding을 만들고
-            TFIDF와 Embedding을 pickle로 저장합니다.
-            만약 미리 저장된 파일이 있으면 저장된 pickle을 불러옵니다.
-        """
-
-        # Pickle을 저장합니다.
-        pickle_name = f"sparse_embedding.bin"
-        tfidfv_name = f"tfidv.bin"
-        emd_path = os.path.join(self.data_path, pickle_name)
-        tfidfv_path = os.path.join(self.data_path, tfidfv_name)
-
-        if os.path.isfile(emd_path) and os.path.isfile(tfidfv_path):
-            with open(emd_path, "rb") as file:
-                self.p_embedding = pickle.load(file)
-            with open(tfidfv_path, "rb") as file:
-                self.tfidfv = pickle.load(file)
-            print("Embedding pickle load.")
-        else:
-            print("Build passage embedding")
-            self.p_embedding = self.tfidfv.fit_transform(tqdm(self.contexts, desc="TF-IDF fitting"))
-            print(self.p_embedding.shape)
-            with open(emd_path, "wb") as file:
-                pickle.dump(self.p_embedding, file)
-            with open(tfidfv_path, "wb") as file:
-                pickle.dump(self.tfidfv, file)
-            print("Embedding pickle saved.")
+        # BM25 선언 
+        self.BM25 = BM25Okapi(self.tokenized_contexts)
 
     def build_faiss(self, num_clusters=64) -> NoReturn:
 
@@ -165,46 +138,42 @@ class SparseRetrieval:
                 Ground Truth가 없는 Query (test) -> Retrieval한 Passage만 반환합니다.
         """
 
-        assert self.p_embedding is not None, "get_sparse_embedding() 메소드를 먼저 수행해줘야합니다."
-
         if isinstance(query_or_dataset, str):
-            doc_scores, doc_indices = self.get_relevant_doc(query_or_dataset, k=topk)
+            # 단일 쿼리 처리
+            tokenized_query = query_or_dataset.split()
+            doc_scores = self.BM25.get_scores(tokenized_query)
+            topk_indices = np.argsort(doc_scores)[::-1][:topk]
+
             print("[Search query]\n", query_or_dataset, "\n")
-
             for i in range(topk):
-                print(f"Top-{i+1} passage with score {doc_scores[i]:4f}")
-                print(self.contexts[doc_indices[i]])
+                print(f"Top-{i+1} passage with score {doc_scores[topk_indices[i]]:.4f}")
+                print(self.contexts[topk_indices[i]])
 
-            return (doc_scores, [self.contexts[doc_indices[i]] for i in range(topk)])
+            return doc_scores[topk_indices].tolist(), [self.contexts[i] for i in topk_indices]
 
         elif isinstance(query_or_dataset, Dataset):
-
-            # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
+            # 여러 쿼리 처리
             total = []
-            with timer("query exhaustive search"):
-                doc_scores, doc_indices = self.get_relevant_doc_bulk(
-                    query_or_dataset["question"], k=topk
-                )
-            for idx, example in enumerate(
-                tqdm(query_or_dataset, desc="Sparse retrieval: ")
-            ):
+            queries = query_or_dataset["question"]
+
+            for query in tqdm(queries, desc="BM25 retrieval"):
+                tokenized_query = query.split()
+                doc_scores = self.BM25.get_scores(tokenized_query)
+                topk_indices = np.argsort(doc_scores)[::-1][:topk]
+
                 tmp = {
-                    # Query와 해당 id를 반환합니다.
-                    "question": example["question"],
-                    "id": example["id"],
-                    # Retrieve한 Passage의 id, context를 반환합니다.
-                    "context": " ".join(
-                        [self.contexts[pid] for pid in doc_indices[idx]]
-                    ),
+                    "question": query,
+                    "id": query_or_dataset["id"],
+                    "context": " ".join([self.contexts[i] for i in topk_indices]),
                 }
-                if "context" in example.keys() and "answers" in example.keys():
-                    # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
-                    tmp["original_context"] = example["context"]
-                    tmp["answers"] = example["answers"]
+
+                if "context" in query_or_dataset and "answers" in query_or_dataset:
+                    tmp["original_context"] = query_or_dataset["context"]
+                    tmp["answers"] = query_or_dataset["answers"]
+
                 total.append(tmp)
 
-            cqas = pd.DataFrame(total)
-            return cqas
+            return pd.DataFrame(total)
 
     def get_relevant_doc(self, query: str, k: Optional[int] = 1) -> Tuple[List, List]:
 
@@ -382,7 +351,6 @@ class SparseRetrieval:
 
         return D.tolist(), I.tolist()
 
-
 if __name__ == "__main__":
 
     import argparse
@@ -445,7 +413,6 @@ if __name__ == "__main__":
 
     else:
         with timer("bulk query by exhaustive search"): 
-            retriever.get_sparse_embedding()
             df = retriever.retrieve(full_ds)
             df["correct"] = df["original_context"] == df["context"]
             print(
