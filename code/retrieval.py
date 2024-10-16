@@ -6,18 +6,20 @@ import random
 import torch
 from torch.utils.data import DataLoader
 from contextlib import contextmanager
-from typing import List, NoReturn, Optional, Tuple, Union
+from typing import List, NoReturn, Optional, Tuple, Union 
+import re
 
 import faiss
 import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from sklearn.feature_extraction.text import TfidfVectorizer 
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from tqdm.auto import tqdm 
 
 # 추가한 코드
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Okapi 
+from kiwipiepy import Kiwi
+
 
 
 seed = 2024
@@ -39,6 +41,7 @@ class SparseRetrieval:
         tokenize_fn,
         data_path: Optional[str] = "../data/",
         context_path: Optional[str] = "wikipedia_documents.json",
+        index_file: Optional[str] = "bm25_index.pkl"
     ) -> NoReturn:
 
         """
@@ -61,23 +64,30 @@ class SparseRetrieval:
         Summary:
             Passage 파일을 불러오고 TfidfVectorizer를 선언하는 기능을 합니다.
         """
-
+        self.tokenize_fn = tokenize_fn
         self.data_path = data_path
+        self.index_file = index_file 
+
         with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
+        print("wiki: ", list(wiki.values())[0])
+
         self.contexts = list(
             dict.fromkeys([v["text"] for v in wiki.values()])
-        )  # set 은 매번 순서가 바뀌므로
-        print(f"Lengths of unique contexts : {len(self.contexts)}")
-        self.ids = list(range(len(self.contexts)))
-
-        # BM250kapi에 사용될 토크나이즈된 텍스트로 변환 
-        print("Tokenizing contexts for BM25...") 
-        self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)]
-
-        # BM25 선언 
-        self.BM25 = BM25Okapi(self.tokenized_contexts)
+        )
+        # 저장된 인덱스 파일이 있으면 로드, 없으면 새로 생성
+        if os.path.isfile(self.index_file):
+            print("Loading BM25 index from pickle file...")
+            with open(self.index_file, "rb") as f:
+                self.BM25 = pickle.load(f)
+        else:
+            print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
+            self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)] 
+            self.BM25 = BM25Okapi(self.tokenized_contexts, k1=0.5, b=0.75)
+            with open(self.index_file, "wb") as f:
+                pickle.dump(self.BM25, f)
+            print("BM25 index saved to pickle.")
 
     def build_faiss(self, num_clusters=64) -> NoReturn:
 
@@ -117,62 +127,56 @@ class SparseRetrieval:
             print("Faiss Indexer Saved.")
 
     def retrieve(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
-    ) -> Union[Tuple[List, List], pd.DataFrame]:
-
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 25
+    ) -> Union[Tuple[List[float], List[int]], pd.DataFrame]:
         """
         Arguments:
-            query_or_dataset (Union[str, Dataset]):
-                str이나 Dataset으로 이루어진 Query를 받습니다.
-                str 형태인 하나의 query만 받으면 `get_relevant_doc`을 통해 유사도를 구합니다.
-                Dataset 형태는 query를 포함한 HF.Dataset을 받습니다.
-                이 경우 `get_relevant_doc_bulk`를 통해 유사도를 구합니다.
-            topk (Optional[int], optional): Defaults to 1.
-                상위 몇 개의 passage를 사용할 것인지 지정합니다.
+            query_or_dataset: Query를 받습니다. (문자열 또는 Dataset)
+            topk: 상위 몇 개의 passage를 사용할지 지정합니다.
 
         Returns:
-            1개의 Query를 받는 경우  -> Tuple(List, List)
-            다수의 Query를 받는 경우 -> pd.DataFrame: [description]
-
-        Note:
-            다수의 Query를 받는 경우,
-                Ground Truth가 있는 Query (train/valid) -> 기존 Ground Truth Passage를 같이 반환합니다.
-                Ground Truth가 없는 Query (test) -> Retrieval한 Passage만 반환합니다.
+            단일 Query의 경우 상위 passage들을 반환합니다.
+            다수의 Query의 경우 DataFrame으로 반환합니다.
         """
 
         if isinstance(query_or_dataset, str):
             # 단일 쿼리 처리
-            tokenized_query = query_or_dataset.split()
+            tokenized_query = self.tokenize_fn(query_or_dataset)
             doc_scores = self.BM25.get_scores(tokenized_query)
             topk_indices = np.argsort(doc_scores)[::-1][:topk]
-
+            print(f"BM25 Scores: {doc_scores}")
+            print("Tokenized Query: ", tokenized_query)
             print("[Search query]\n", query_or_dataset, "\n")
+            
             for i in range(topk):
                 print(f"Top-{i+1} passage with score {doc_scores[topk_indices[i]]:.4f}")
-                print(self.contexts[topk_indices[i]])
+                print(self.contexts[topk_indices[i]]) 
 
-            return doc_scores[topk_indices].tolist(), [self.contexts[i] for i in topk_indices]
+            return doc_scores[topk_indices].tolist(), topk_indices.tolist()
 
         elif isinstance(query_or_dataset, Dataset):
             # 여러 쿼리 처리
-            total = []
-            queries = query_or_dataset["question"]
+            total = [] 
+            queries = query_or_dataset["question"] 
 
-            for query in tqdm(queries, desc="BM25 retrieval"):
-                tokenized_query = query.split()
+            print("query or dataset: ", query_or_dataset)
+
+            # 이거 나중에 에러 없는 경우에는 queries[:100] -> queries로 변경하기
+            for idx, query in enumerate(tqdm(queries[:100], desc="BM25 retrieval")):
+                tokenized_query = self.tokenize_fn(query)
                 doc_scores = self.BM25.get_scores(tokenized_query)
                 topk_indices = np.argsort(doc_scores)[::-1][:topk]
 
                 tmp = {
                     "question": query,
-                    "id": query_or_dataset["id"],
+                    "id": query_or_dataset["id"][idx],
                     "context": " ".join([self.contexts[i] for i in topk_indices]),
                 }
 
-                if "context" in query_or_dataset and "answers" in query_or_dataset:
-                    tmp["original_context"] = query_or_dataset["context"]
-                    tmp["answers"] = query_or_dataset["answers"]
-
+                
+                if "context" in query_or_dataset.features and "answers" in query_or_dataset.features:
+                    tmp["original_context"] = query_or_dataset["context"][idx]
+                    tmp["answers"] = query_or_dataset["answers"][idx]
                 total.append(tmp)
 
             return pd.DataFrame(total)
@@ -419,7 +423,7 @@ class DenseRetrieval:
         """DPR 모델 학습 - Wikipedia JSON 파일을 기반으로 학습"""
         
         # JSON 파일 로드
-        with open(os.path.join(data_path, 'wikipedia_documents.json'), 'r', encoding='utf-8') as f:
+        with open(os.path.join(data_path, 'wikipedia_documents.json'), 'r', encoding='utf-8', errors='ignore') as f:
             wiki_data = json.load(f)
 
         # 쿼리와 문서 추출
@@ -510,10 +514,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--model_name_or_path",
-        metavar="snumin44/biencoder-ko-bert-question",
+        metavar="klue/roberta-large",
         type=str,
         help="", 
-        default="snumin44/biencoder-ko-bert-question",
+        default="klue/roberta-large",
     )
     parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
     parser.add_argument(
@@ -534,12 +538,26 @@ if __name__ == "__main__":
     print("*" * 40, "query dataset", "*" * 40)
     print(full_ds)
 
-    from transformers import AutoTokenizer
+    # Kiwi 초기화 
+    kiwi = Kiwi()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=False,)
+    # tokenize_fn 정의
+    def kiwipiepy_tokenize(text):
+        try:
+            cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
+            tokens = kiwi.tokenize(cleaned_text)
+            return [token.form for token in tokens]
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+            return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return []
 
     retriever = SparseRetrieval(
-        tokenize_fn=tokenizer.tokenize,
+        tokenize_fn=kiwipiepy_tokenize,
         data_path=args.data_path,
         context_path=args.context_path,
     )
@@ -556,8 +574,9 @@ if __name__ == "__main__":
         with timer("bulk query by exhaustive search"): 
             retriever.get_sparse_embedding()
             df = retriever.retrieve_faiss(full_ds)
-            df["correct"] = df["original_context"] == df["context"]
+            df["correct"] = df["original_context"] == df["context"] 
 
+        
             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
     else:
@@ -570,4 +589,5 @@ if __name__ == "__main__":
             )
 
         with timer("single query by exhaustive search"):
-            scores, indices = retriever.retrieve(query)
+            scores, indices = retriever.retrieve(query) 
+

@@ -9,4 +9,5 @@ scikit-learn
 faiss-gpu
 
 # 내가 추가한 라이브러리 
-rank-bm25
+bm25_pt
+kiwipiepy
