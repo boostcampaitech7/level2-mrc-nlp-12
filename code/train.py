@@ -419,6 +419,7 @@ def run_mrc(
 
 
         # 같은 context에 대한 질문들 출력
+        print('*** 같은 context에 대한 질문 pair ***')
         context_to_results = defaultdict(list)
         for result in results_sorted:
             context = result['context']
