@@ -7,3 +7,4 @@ experiments/
 assets/
 models/
 outputs/
+wandb/
