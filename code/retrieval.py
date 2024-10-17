@@ -71,8 +71,6 @@ class SparseRetrieval:
         with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
-        print("wiki: ", list(wiki.values())[0])
-
         self.contexts = list(
             dict.fromkeys([v["text"] for v in wiki.values()])
         )
@@ -144,13 +142,11 @@ class SparseRetrieval:
             tokenized_query = self.tokenize_fn(query_or_dataset)
             doc_scores = self.BM25.get_scores(tokenized_query)
             topk_indices = np.argsort(doc_scores)[::-1][:topk]
-            print(f"BM25 Scores: {doc_scores}")
-            print("Tokenized Query: ", tokenized_query)
             print("[Search query]\n", query_or_dataset, "\n")
             
-            for i in range(topk):
-                print(f"Top-{i+1} passage with score {doc_scores[topk_indices[i]]:.4f}")
-                print(self.contexts[topk_indices[i]]) 
+            # for i in range(topk):
+            #     print(f"Top-{i+1} passage with score {doc_scores[topk_indices[i]]:.4f}")
+            #     print(self.contexts[topk_indices[i]]) 
 
             return doc_scores[topk_indices].tolist(), topk_indices.tolist()
 
@@ -170,7 +166,8 @@ class SparseRetrieval:
                 tmp = {
                     "question": query,
                     "id": query_or_dataset["id"][idx],
-                    "context": " ".join([self.contexts[i] for i in topk_indices]),
+                    "context": " ".join([self.contexts[i] for i in topk_indices]), 
+                    "first_context": self.contexts[topk_indices[0]]
                 }
 
                 
@@ -272,9 +269,9 @@ class SparseRetrieval:
             )
             print("[Search query]\n", query_or_dataset, "\n")
 
-            for i in range(topk):
-                print("Top-%d passage with score %.4f" % (i + 1, doc_scores[i]))
-                print(self.contexts[doc_indices[i]])
+            # for i in range(topk):
+            #     print("Top-%d passage with score %.4f" % (i + 1, doc_scores[i]))
+            #     print(self.contexts[doc_indices[i]])
 
             return (doc_scores, [self.contexts[doc_indices[i]] for i in range(topk)])
 
@@ -574,15 +571,28 @@ if __name__ == "__main__":
         with timer("bulk query by exhaustive search"): 
             retriever.get_sparse_embedding()
             df = retriever.retrieve_faiss(full_ds)
-            df["correct"] = df["original_context"] == df["context"] 
+            df["correct"] = df["original_context"] == df["context"]
 
         
             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
     else:
         with timer("bulk query by exhaustive search"): 
+            def show_differences(str1, str2):
+                # 각 문자열을 줄 단위로 나눠서 보여줌
+                print("Original Context:\n", repr(str1))
+                print("Corrected Context:\n", repr(str2))
+
+                # 문자열이 동일하지 않을 경우 차이점을 출력
+                if str1 != str2:
+                    for i, (a, b) in enumerate(zip(str1, str2)):
+                        if a != b:
+                            print(f"Difference at index {i}: '{a}' != '{b}'")
+
+            
             df = retriever.retrieve(full_ds)
-            df["correct"] = df["original_context"] == df["context"]
+            df["correct"] = df["original_context"] == df["first_context"]
+            # 데이터프레임의 각 행을 비교하고 차이점을 출력
             print(
                 "correct retrieval result by exhaustive search",
                 df["correct"].sum() / len(df),

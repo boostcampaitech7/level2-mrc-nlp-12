@@ -33,6 +33,7 @@ from transformers import (
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
+from kiwipiepy import Kiwi
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,25 @@ def main():
         else model_args.model_name_or_path,
         use_fast=True,
     )
+
+    # Kiwi 초기화 
+    kiwi = Kiwi()
+
+    # tokenize_fn 정의
+    def kiwipiepy_tokenize(text):
+        try:
+            cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
+            tokens = kiwi.tokenize(cleaned_text)
+            return [token.form for token in tokens]
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+            return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return []
+
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -89,7 +109,7 @@ def main():
     # True일 경우 : run passage retrieval
     if data_args.eval_retrieval:
         datasets = run_sparse_retrieval(
-            tokenizer.tokenize, datasets, training_args, data_args,
+            kiwipiepy_tokenize, datasets, training_args, data_args,
         )
 
     # eval or predict mrc model
@@ -110,7 +130,6 @@ def run_sparse_retrieval(
     retriever = SparseRetrieval(
         tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
     )
-    retriever.get_sparse_embedding()
 
     if data_args.use_faiss:
         retriever.build_faiss(num_clusters=data_args.num_clusters)
