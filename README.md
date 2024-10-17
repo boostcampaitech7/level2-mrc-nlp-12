@@ -96,6 +96,12 @@ pre-commit 4.0.1
 % pre-commit install
 ```
 
+### Troubleshoot
+- pre-commit이 실행되지 않을 경우
+```zsh
+% pre-commit clean && pre-commit install && pre-commit run --all-files
+```
+
 ## 파일 구성
 
 
