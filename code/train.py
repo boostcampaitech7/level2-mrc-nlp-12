@@ -21,6 +21,10 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from utils import (
+    check_git_status,
+    create_experiment_dir,
+)
 from utils_qa import check_no_error, postprocess_qa_predictions
 
 
@@ -39,9 +43,18 @@ if deterministic: # cudnn random seed 고정 - 고정 시 학습 속도가 느�
 logger = logging.getLogger(__name__)
 
 
+
+
+
 def main():
     # 가능한 arguments 들은 ./arguments.py 나 transformer package 안의 src/transformers/training_args.py 에서 확인 가능합니다.
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
+
+    commit_id = check_git_status()
+    experiment_dir = create_experiment_dir(commit_id=commit_id)
+
+    if "--output_dir" not in sys.argv:
+        sys.argv.extend(["--output_dir", experiment_dir])
 
     parser = HfArgumentParser(
         (ModelArguments, DataTrainingArguments, TrainingArguments)
