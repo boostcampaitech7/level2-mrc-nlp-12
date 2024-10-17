@@ -1,0 +1,12 @@
+*.tar.gz
+data/
+.env
+config.json
+__pycache__/
+experiments/
+assets/
+models/
+outputs/
+wandb/
+.vscode/
+install/
