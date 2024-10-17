@@ -4,6 +4,7 @@ transformers==4.25.1
 tqdm
 pandas
 scikit-learn
+wandb
 
 # faiss install (if you want to)
 faiss-gpu
