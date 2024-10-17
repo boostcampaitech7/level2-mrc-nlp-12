@@ -6,6 +6,9 @@ import random
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
+from torch.utils.data import DataLoader 
+from torch.nn.utils.rnn import pad_sequence
+
 
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union 
@@ -15,7 +18,7 @@ import faiss
 import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel, AdamW, get_linear_schedule_with_warmup
 from tqdm.auto import tqdm 
 
 # 추가한 코드
@@ -369,6 +372,24 @@ class PolyEncoder(nn.Module):
         # Initialize poly_code_embeddings
         nn.init.normal_(self.poly_code_embeddings.weight, self.bert.config.hidden_size ** -0.5)
 
+    def __len__(self):
+        return len(self.queries)
+
+    def __getitem__(self, idx):
+        query = self.queries[idx]
+        context = self.contexts[idx]
+        
+        # 쿼리와 문맥을 토크나이징
+        query_inputs = self.tokenizer(query, truncation=True, padding='max_length', max_length=self.max_length, return_tensors="pt")
+        context_inputs = self.tokenizer(context, truncation=True, padding='max_length', max_length=self.max_length, return_tensors="pt")
+        
+        return {
+            'query_input_ids': query_inputs['input_ids'].squeeze(0),
+            'query_attention_mask': query_inputs['attention_mask'].squeeze(0),
+            'context_input_ids': context_inputs['input_ids'].squeeze(0),
+            'context_attention_mask': context_inputs['attention_mask'].squeeze(0)
+        }
+
     def dot_attention(self, q, k, v):
         """
         q: [bs, poly_m, dim] or [bs, res_cnt, dim]
@@ -398,12 +419,15 @@ class PolyEncoder(nn.Module):
 
         # Dot product between query embedding and context embedding
         scores = torch.matmul(query_emb, context_emb.unsqueeze(-1)).squeeze(-1)  # [bs, poly_m]
-        return scores.mean(dim=1)
+        return query_emb, context_emb, scores
+
+
 
 class DenseRetrievalPolyEncoder:
-    def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, device="cuda"):
+    def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, margin=2, device="cuda"):
         self.model = PolyEncoder(model_name_or_path, poly_m=poly_m, device=device).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        self.loss_fct = nn.TripletMarginLoss(margin=margin)  # Triplet Margin Loss 적용
         self.data_path = data_path
         self.context_path = context_path
         self.device = device
@@ -421,15 +445,42 @@ class DenseRetrievalPolyEncoder:
         score = self.model(query_inputs.input_ids, query_inputs.attention_mask, context_inputs.input_ids, context_inputs.attention_mask)
         return score.item()
     
-    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 8):
+    def encode_query_context_batch(self, query_batch, context_batch):
+        # 여러 쿼리와 여러 컨텍스트를 배치로 처리
+        query_inputs = self.tokenizer(query_batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+        context_inputs = self.tokenizer(context_batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+
+        # 모델을 이용해 쿼리와 컨텍스트 간의 점수 계산
+        with torch.no_grad():  # 추론이므로 gradient 계산을 하지 않음
+            with torch.cuda.amp.autocast():
+                scores = self.model(
+                    query_inputs.input_ids,
+                    query_inputs.attention_mask,
+                    context_inputs.input_ids,
+                    context_inputs.attention_mask
+                ) 
+                if isinstance(scores, tuple):
+                    scores = scores[0]  # 첫 번째 출력 요소 사용
+                else:
+                    scores = scores
+
+        # GPU에서 계산된 결과를 CPU로 옮긴 뒤 numpy 배열로 변환
+        return scores.cpu().detach().numpy()
+    
+    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 8): 
+        print("retrieve를 진행한다 - DRPE")
         total_results = []
 
         # 단일 쿼리 처리
-        if isinstance(query_or_dataset, str):
+        if isinstance(query_or_dataset, str): 
+            print("단일 쿼리 처리를 진행한다.")
             scores = []
-            for context in self.contexts:
-                score = self.encode_query_context(query_or_dataset, context)
-                scores.append(score)
+            context_batch_size = 64
+
+            for start_idx in tqdm(range(0, len(self.contexts), context_batch_size), desc="단일 쿼리 컨텍스트 처리"):
+                context_batch = self.contexts[start_idx:start_idx + context_batch_size]
+                batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch), context_batch)
+                scores.extend(batch_scores)
   
             # 상위 k개 문서 선택
             topk_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:topk]
@@ -438,8 +489,9 @@ class DenseRetrievalPolyEncoder:
 
             return pd.DataFrame({"query": query_or_dataset, "topk_contexts": topk_contexts, "topk_scores": topk_scores})
 
-    # 다중 쿼리 처리 (PolyEncoder 방식으로 개선)
-        elif isinstance(query_or_dataset, Dataset):
+        # 다중 쿼리 처리 (PolyEncoder 방식으로 개선)
+        elif isinstance(query_or_dataset, Dataset): 
+            print("다중 쿼리 처리를 진행한다.")
             queries = query_or_dataset["question"]
 
             # 쿼리 배치와 문서 배치를 동시에 인코딩하고 PolyEncoder를 사용하여 처리
@@ -456,7 +508,7 @@ class DenseRetrievalPolyEncoder:
 
                 # 상위 k개의 문서 선택
                 topk_indices = torch.topk(scores, topk, dim=1).indices
-                for i, query in enumerate(query_batch):
+                for i, query in tqdm(enumerate(query_batch), desc="Processing documents"):
                     topk_contexts = [self.contexts[idx] for idx in topk_indices[i]]
                     topk_scores = scores[i][topk_indices[i]].tolist()
 
@@ -468,8 +520,120 @@ class DenseRetrievalPolyEncoder:
 
             return pd.DataFrame(total_results)
     
+    def preprocess_function(self, examples, tokenizer):
+        # 쿼리와 문맥에 대해 각각 토큰화 진행
+        query_encodings = tokenizer(examples['question'], truncation=True, padding=True)
 
+        # positive_context는 실제 context를 사용
+        positive_encodings = tokenizer(examples['context'], truncation=True, padding=True)
+        
+        # negative_context는 다른 문서를 무작위로 선택 (배치 내에서 무작위로 섞기)
+        shuffled_contexts = random.sample(examples['context'], len(examples['context']))
+        negative_encodings = tokenizer(shuffled_contexts, truncation=True, padding=True) 
 
+        return {
+            'query_input_ids': query_encodings['input_ids'],
+            'query_attention_mask': query_encodings['attention_mask'],
+            'positive_context_input_ids': positive_encodings['input_ids'],
+            'positive_context_attention_mask': positive_encodings['attention_mask'],
+            'negative_context_input_ids': negative_encodings['input_ids'],
+            'negative_context_attention_mask': negative_encodings['attention_mask']
+        }
+
+    def custom_collate_fn(self, batch):
+        # 각 요소에서 'input_ids'와 'attention_mask'를 추출하여 패딩
+        query_input_ids = [torch.tensor(b['query_input_ids']) for b in batch]
+        query_attention_mask = [torch.tensor(b['query_attention_mask']) for b in batch]
+        
+        positive_context_input_ids = [torch.tensor(b['positive_context_input_ids']) for b in batch]
+        positive_context_attention_mask = [torch.tensor(b['positive_context_attention_mask']) for b in batch]
+        
+        negative_context_input_ids = [torch.tensor(b['negative_context_input_ids']) for b in batch]
+        negative_context_attention_mask = [torch.tensor(b['negative_context_attention_mask']) for b in batch]
+
+        # 패딩을 통해 각 시퀀스의 길이를 맞춤
+        padded_query_input_ids = pad_sequence(query_input_ids, batch_first=True, padding_value=0)
+        padded_query_attention_mask = pad_sequence(query_attention_mask, batch_first=True, padding_value=0)
+        
+        padded_positive_context_input_ids = pad_sequence(positive_context_input_ids, batch_first=True, padding_value=0)
+        padded_positive_context_attention_mask = pad_sequence(positive_context_attention_mask, batch_first=True, padding_value=0)
+        
+        padded_negative_context_input_ids = pad_sequence(negative_context_input_ids, batch_first=True, padding_value=0)
+        padded_negative_context_attention_mask = pad_sequence(negative_context_attention_mask, batch_first=True, padding_value=0)
+
+        return {
+            'query_input_ids': padded_query_input_ids,
+            'query_attention_mask': padded_query_attention_mask,
+            'positive_context_input_ids': padded_positive_context_input_ids,
+            'positive_context_attention_mask': padded_positive_context_attention_mask,
+            'negative_context_input_ids': padded_negative_context_input_ids,
+            'negative_context_attention_mask': padded_negative_context_attention_mask,
+        }
+
+    def train_step(self, batch, optimizer, scheduler):
+        self.model.train()
+        total_loss = 0
+
+        query_input_ids = batch['query_input_ids'].to(self.device)
+        query_attention_mask = batch['query_attention_mask'].to(self.device)
+        positive_context_input_ids = batch['positive_context_input_ids'].to(self.device)  # 정답 문서
+        positive_context_attention_mask = batch['positive_context_attention_mask'].to(self.device)
+        negative_context_input_ids = batch['negative_context_input_ids'].to(self.device)  # 오답 문서
+        negative_context_attention_mask = batch['negative_context_attention_mask'].to(self.device)
+
+        # 쿼리와 문서 임베딩 계산
+        query_emb, positive_emb, scores = self.model(query_input_ids, query_attention_mask, positive_context_input_ids, positive_context_attention_mask)
+        _, negative_emb, scores = self.model(query_input_ids, query_attention_mask, negative_context_input_ids, negative_context_attention_mask)
+
+        # 임베딩 차원이 2D인지 확인 후 연산
+        query_emb_mean = query_emb.mean(dim=1) 
+        positive_emb_mean = positive_emb
+        negative_emb_mean = negative_emb
+
+        # TripletMarginLoss로 손실 계산 
+        loss = self.loss_fct(query_emb_mean, positive_emb_mean, negative_emb_mean)  # 쿼리와 정답 문서 임베딩 간의 거리는 최소화하고, 오답 문서와는 최대화
+
+        # 스코어 값 출력
+        if random.random() < 0.05:  # 5% 확률로 스코어 확인
+            positive_score = torch.norm(query_emb_mean - positive_emb_mean, p=2)
+            negative_score = torch.norm(query_emb_mean - negative_emb_mean, p=2)
+            print(f"Positive Score (L2 distance): {positive_score}")
+            print(f"Negative Score (L2 distance): {negative_score}")
+            print(f"Loss: {loss.item()}")
+
+        # 역전파 및 최적화
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
+
+        total_loss += loss.item()
+
+        return total_loss
+
+    def train_model(self, model, train_dataloader, val_dataloader=None, epochs=3, lr=5e-6, warmup_steps=500):
+        # Optimizer와 Scheduler 설정
+        optimizer = AdamW(self.model.parameters(), lr=lr)
+        total_steps = len(train_dataloader) * epochs
+        scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
+    
+        # 학습 시작
+        for epoch in tqdm(range(epochs), desc="에폭: "):
+            self.model.train()  # 모델을 학습 모드로 설정
+            total_loss = 0
+
+            print(f"Epoch {epoch + 1}/{epochs}")
+
+            print("Length of Train DataLoader: ", len(train_dataloader))
+
+            for step, batch in tqdm(enumerate(train_dataloader), desc="데이터 트레이닝하기"):
+                optimizer.zero_grad()  # 이전 배치의 gradient 초기화
+
+                # 각 배치에서 train_step 호출하여 손실 계산 및 학습
+                loss = self.train_step(batch, optimizer, scheduler)  # 배치 단위 학습
+                total_loss += loss
+
+                if step % 100 == 0:  # 100 스텝마다 현재 손실 출력
+                    print(f"Step {step}, Loss: {loss}")
 
         
 
@@ -604,7 +768,6 @@ if __name__ == "__main__":
         ]
     )
     print("*" * 40, "query dataset", "*" * 40)
-    print(full_ds)
 
     # Initialize PolyEncoder-based Dense Retrieval
     retriever = DenseRetrievalPolyEncoder(
@@ -614,6 +777,30 @@ if __name__ == "__main__":
         poly_m=64,  # You can adjust this value based on your needs
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
+
+    # 데이터셋에 적용
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    encoded_dataset = full_ds.map(lambda examples: retriever.preprocess_function(examples, tokenizer), batched=True)
+
+    # 학습을 위한 DataLoader 설정
+    train_dataloader = DataLoader(encoded_dataset, batch_size=32, shuffle=True, collate_fn=retriever.custom_collate_fn)
+
+    # 저장된 모델 가중치 파일 경로
+    model_path = "retriever_model.pth"
+
+    # retriever 모델 가중치 로드 및 평가 모드 전환
+    if os.path.exists(model_path):
+        print(f"모델 가중치 '{model_path}' 파일을 불러옵니다.")
+        
+        # 저장된 모델 가중치 불러오기
+        retriever.load_state_dict(torch.load(model_path))
+        retriever.eval()  # 평가 모드로 전환
+        print("모델이 평가 모드로 전환되었습니다.")
+    else:
+        print(f"'{model_path}' 파일이 존재하지 않습니다. 모델을 학습한 후 저장해야 합니다.")
+        # PolyEncoder 모델 학습
+        retriever.train_model(retriever, train_dataloader, None, epochs=3, lr=5e-5) 
+        torch.save(retriever.state_dict(), model_path)
 
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
@@ -628,6 +815,11 @@ if __name__ == "__main__":
             print(f"Top results for query: {query}")
             print(scores, indices)
     else:
+
+        # Single query evaluation
+        with timer("single query by exhaustive search"):
+            scores, indices = retriever.retrieve(query)
+
         # Exhaustive DPR Search using PolyEncoder
         with timer("bulk query by exhaustive search"): 
             def show_differences(str1, str2):
@@ -639,7 +831,7 @@ if __name__ == "__main__":
                             print(f"Difference at index {i}: '{a}' != '{b}'")
 
             # PolyEncoder-based retrieval for multiple queries
-            df = retriever.retrieve(full_ds)
+            df = retriever.retrieve(full_ds, topk=5, query_batch_size=2)
             
             # 데이터프레임의 열 목록을 출력
             print("df columns: ", df.columns) 
@@ -649,9 +841,3 @@ if __name__ == "__main__":
                 print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
             else:
                 print("Error: DataFrame doesn't contain required columns")
-
-        # Single query evaluation
-        with timer("single query by exhaustive search"):
-            scores, indices = retriever.retrieve(query)
-            print("Top scores:", scores)
-            print("Top indices:", indices)
