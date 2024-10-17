@@ -4,16 +4,18 @@ import pickle
 import time
 import random
 import torch
-from torch.utils.data import DataLoader
+import torch.nn as nn 
+import torch.nn.functional as F
+
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union 
 import re
-
+import argparse
 import faiss
 import numpy as np
 import pandas as pd
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
 from tqdm.auto import tqdm 
 
 # 추가한 코드
@@ -158,7 +160,7 @@ class SparseRetrieval:
             print("query or dataset: ", query_or_dataset)
 
             # 이거 나중에 에러 없는 경우에는 queries[:100] -> queries로 변경하기
-            for idx, query in enumerate(tqdm(queries[:100], desc="BM25 retrieval")):
+            for idx, query in enumerate(tqdm(queries, desc="BM25 retrieval")):
                 tokenized_query = self.tokenize_fn(query)
                 doc_scores = self.BM25.get_scores(tokenized_query)
                 topk_indices = np.argsort(doc_scores)[::-1][:topk]
@@ -354,250 +356,302 @@ class SparseRetrieval:
 
         return D.tolist(), I.tolist()
 
-class DenseRetrieval: 
-    def __init__(
-        self, 
-        model_name_or_path: str,
-        data_path: Optional[str] = "../data/", 
-        context_path: Optional[str] = "wikipedia_documents.json",
-        batch_size: int = 16, 
-        max_length: int = 256, 
-        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ): 
-        self.device = device 
-        self.batch_size = batch_size
-        self.max_length = max_length 
+# Poly Encoder를 이용해서 DenseRetrieval 클래스를 구현
+class PolyEncoder(nn.Module): 
+    def __init__(self, model_name_or_path, poly_m=64, device="cuda"):
+        super(PolyEncoder, self).__init__()
+        self.bert = AutoModel.from_pretrained(model_name_or_path) 
+        self.poly_m = poly_m 
+        self.poly_code_embeddings = nn.Embedding(poly_m, self.bert.config.hidden_size).to(device) 
+        self.device = device
+        # Extract 'text' field from wiki and remove duplicates 
 
-        # 모델과 토크나이저 로드 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path) 
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name_or_path) 
-        self.model.to(self.device) 
+        # Initialize poly_code_embeddings
+        nn.init.normal_(self.poly_code_embeddings.weight, self.bert.config.hidden_size ** -0.5)
 
-        # 데이터를 파일에서 로드 
-        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f: 
-            wiki = json.load(f) 
+    def dot_attention(self, q, k, v):
+        """
+        q: [bs, poly_m, dim] or [bs, res_cnt, dim]
+        k=v: [bs, length, dim] or [bs, poly_m, dim]
+        """
+        attn_weights = torch.matmul(q, k.transpose(2, 1))  # [bs, poly_m, length]
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1) 
+        output = torch.matmul(attn_weights, v)  # [bs, poly_m, dim] 
+        return output
+    
+    def forward(self, query_input_ids, query_attention_mask, context_input_ids, context_attention_mask):
+        # Encode the query
+        query_output = self.bert(input_ids=query_input_ids, attention_mask=query_attention_mask).last_hidden_state
+        batch_size = query_input_ids.size(0)
+
+        # Get poly-code embeddings 
+        poly_code_ids = torch.arange(self.poly_m).to(self.device) 
+        poly_code_ids = poly_code_ids.unsqueeze(0).expand(batch_size, self.poly_m)  # [bs, poly_m]
+        poly_codes = self.poly_code_embeddings(poly_code_ids)  # [bs, poly_m, dim]
+
+        # Apply dot attention between poly-codes and query hidden states
+        query_emb = self.dot_attention(poly_codes, query_output, query_output) 
+
+        # Encode the context (document) 
+        context_output = self.bert(input_ids=context_input_ids, attention_mask=context_attention_mask).last_hidden_state 
+        context_emb = context_output[:, 0, :] 
+
+        # Dot product between query embedding and context embedding
+        scores = torch.matmul(query_emb, context_emb.unsqueeze(-1)).squeeze(-1)  # [bs, poly_m]
+        return scores.mean(dim=1)
+
+class DenseRetrievalPolyEncoder:
+    def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, device="cuda"):
+        self.model = PolyEncoder(model_name_or_path, poly_m=poly_m, device=device).to(device)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        self.data_path = data_path
+        self.context_path = context_path
+        self.device = device
+    
+        # Load Wikipedia data (contexts) from json file
+        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+            wiki = json.load(f)
+
+        # Extract 'text' field from wiki and remove duplicates
         self.contexts = list(dict.fromkeys([v["text"] for v in wiki.values()]))
 
-    def encode(self, query_or_dataset: Union[str, List[str], Dataset], context: Optional[str] = None) -> Union[torch.Tensor, List[torch.Tensor]]:
-        """쿼리와 문서를 인코딩 (단일 쿼리, 다수 쿼리, Dataset 모두 처리)"""
+    def encode_query_context(self, query, context):
+        query_inputs = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True).to(self.device)
+        context_inputs = self.tokenizer(context, return_tensors="pt", padding=True, truncation=True).to(self.device)
+        score = self.model(query_inputs.input_ids, query_inputs.attention_mask, context_inputs.input_ids, context_inputs.attention_mask)
+        return score.item()
+    
+    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 8):
+        total_results = []
 
+        # 단일 쿼리 처리
         if isinstance(query_or_dataset, str):
-            # 단일 쿼리 처리
-            inputs = self.tokenizer(
-                query_or_dataset, 
-                context if context else self.contexts,  # 문서 리스트 또는 하나의 문서
-                truncation=True,
-                padding="max_length",
-                max_length=self.max_length,
-                return_tensors="pt"
-            )
-        elif isinstance(query_or_dataset, list):
-            # 다수의 쿼리 처리
-            inputs = self.tokenizer(
-                query_or_dataset,
-                context if context else [self.contexts for _ in query_or_dataset],  # 각 쿼리에 대해 문서 리스트 반복
-                truncation=True,
-                padding="max_length",
-                max_length=self.max_length,
-                return_tensors="pt"
-            )
-        elif isinstance(query_or_dataset, Dataset):
-            # Dataset 처리 (여기서 context는 데이터셋 내부에 포함됨)
-            inputs = self.tokenizer(
-                query_or_dataset["question"],
-                query_or_dataset["context"],
-                truncation=True,
-                padding="max_length",
-                max_length=self.max_length,
-                return_tensors="pt"
-            )
-        else:
-            raise ValueError("query_or_dataset는 str, List[str] 또는 Dataset 타입이어야 합니다.")
-        
-        return inputs
-
-    def train(self, data_path: str, epochs: int = 3, learning_rate: float = 5e-5):
-        """DPR 모델 학습 - Wikipedia JSON 파일을 기반으로 학습"""
-        
-        # JSON 파일 로드
-        with open(os.path.join(data_path, 'wikipedia_documents.json'), 'r', encoding='utf-8', errors='ignore') as f:
-            wiki_data = json.load(f)
-
-        # 쿼리와 문서 추출
-        queries = [v['query'] for v in wiki_data.values()]
-        contexts = [v['context'] for v in wiki_data.values()]
-        
-        # 배치 데이터 생성
-        dataset = [{'query': q, 'context': c} for q, c in zip(queries, contexts)]
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
-
-        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-        self.model.train()
-
-        for epoch in range(epochs):
-            epoch_loss = 0
-            for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}"):
-                # In-Batch Negative 샘플 생성
-                positive_examples, negative_examples = self.prepare_in_batch_negative(batch)
-
-                # 긍정 쌍과 음성 쌍의 로스 계산
-                positive_loss = self._compute_loss(positive_examples, is_positive=True)
-                negative_loss = self._compute_loss(negative_examples, is_positive=False)
-
-                # 최종 손실 계산 및 역전파
-                loss = positive_loss + negative_loss
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
-                epoch_loss += loss.item()
-
-            print(f"Epoch {epoch+1} Loss: {epoch_loss / len(dataloader)}")
-
-    def retrieve(self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 5) -> Union[Tuple[List, List], pd.DataFrame]:
-        """DPR로 상위 k개의 문서 검색 (단일 쿼리 및 다수 쿼리 모두 처리 가능)"""
-        
-        self.model.eval()  # 모델을 평가 모드로 설정
-        
-        if isinstance(query_or_dataset, str):
-            # 단일 쿼리 처리
             scores = []
-            for context in tqdm(self.contexts, desc="Retrieving"):
-                inputs = self.encode(query_or_dataset, context)  # 단일 쿼리와 문서 인코딩
-                with torch.no_grad():
-                    outputs = self.model(**inputs.to(self.device))
-                    score = outputs.logits.squeeze().item()
-                    scores.append(score)
+            for context in self.contexts:
+                score = self.encode_query_context(query_or_dataset, context)
+                scores.append(score)
+  
+            # 상위 k개 문서 선택
+            topk_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:topk]
+            topk_contexts = [self.contexts[i] for i in topk_indices]
+            topk_scores = [scores[i] for i in topk_indices]
 
-            topk_indices = np.argsort(scores)[::-1][:topk]
-            return [self.contexts[i] for i in topk_indices], [scores[i] for i in topk_indices]
-        
+            return pd.DataFrame({"query": query_or_dataset, "topk_contexts": topk_contexts, "topk_scores": topk_scores})
+
+    # 다중 쿼리 처리 (PolyEncoder 방식으로 개선)
         elif isinstance(query_or_dataset, Dataset):
-            # 다수의 쿼리 처리 (Dataset)
-            total_results = []
-            
-            for query in tqdm(query_or_dataset["question"], desc="Retrieving for multiple queries"):
-                scores = []
-                for context in self.contexts:
-                    inputs = self.encode(query, context)  # 다수의 쿼리 인코딩
-                    with torch.no_grad():
-                        outputs = self.model(**inputs.to(self.device))
-                        score = outputs.logits.squeeze().item()
-                        scores.append(score)
+            queries = query_or_dataset["question"]
 
-                topk_indices = np.argsort(scores)[::-1][:topk]
-                topk_contexts = [self.contexts[i] for i in topk_indices]
-                topk_scores = [scores[i] for i in topk_indices]
+            # 쿼리 배치와 문서 배치를 동시에 인코딩하고 PolyEncoder를 사용하여 처리
+            for start_idx in tqdm(range(0, len(queries), query_batch_size), desc="Processing queries"):
+                query_batch = queries[start_idx:start_idx + query_batch_size]
                 
-                total_results.append({
-                    "query": query,
-                    "topk_contexts": topk_contexts,
-                    "topk_scores": topk_scores,
-                })
-            
-            # DataFrame 형태로 반환
+                # 쿼리와 문서 배치를 한번에 인코딩
+                query_inputs = self.tokenizer(query_batch, return_tensors="pt", padding=True, truncation=True).to(self.device)
+                context_inputs = self.tokenizer(self.contexts, return_tensors="pt", padding=True, truncation=True).to(self.device)
+
+                # PolyEncoder로 쿼리 배치와 문서 배치에 대한 점수 계산
+                scores = self.model(query_inputs.input_ids, query_inputs.attention_mask, 
+                                    context_inputs.input_ids, context_inputs.attention_mask)
+
+                # 상위 k개의 문서 선택
+                topk_indices = torch.topk(scores, topk, dim=1).indices
+                for i, query in enumerate(query_batch):
+                    topk_contexts = [self.contexts[idx] for idx in topk_indices[i]]
+                    topk_scores = scores[i][topk_indices[i]].tolist()
+
+                    total_results.append({
+                        "query": query,
+                        "topk_contexts": topk_contexts,
+                        "topk_scores": topk_scores,
+                    })
+
             return pd.DataFrame(total_results)
+    
 
-        else:
-            raise ValueError("query_or_dataset는 str 또는 Dataset이어야 합니다.")
 
+
+        
+
+
+# BM25 관련 코드
+# if __name__ == "__main__":
+#     parser = argparse.ArgumentParser(description="")
+#     parser.add_argument(
+#         "--dataset_name", metavar="./data/train_dataset", type=str, help="", default="../data/train_dataset"
+#     )
+#     parser.add_argument(
+#         "--model_name_or_path",
+#         metavar="klue/roberta-large",
+#         type=str,
+#         help="", 
+#         default="klue/roberta-large",
+#     )
+#     parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
+#     parser.add_argument(
+#         "--context_path", metavar="wikipedia_documents", type=str, help="", default="wikipedia_documents.json"
+#     )
+#     parser.add_argument("--use_faiss", metavar=False, type=bool, help="", default=False)
+
+#     args = parser.parse_args()
+
+#     # Test sparse
+#     org_dataset = load_from_disk(args.dataset_name)
+#     full_ds = concatenate_datasets(
+#         [
+#             org_dataset["train"].flatten_indices(),
+#             org_dataset["validation"].flatten_indices(),
+#         ]
+#     )  # train dev 를 합친 4192 개 질문에 대해 모두 테스트
+#     print("*" * 40, "query dataset", "*" * 40)
+#     print(full_ds)
+
+#     # Kiwi 초기화 
+#     kiwi = Kiwi()
+
+#     # tokenize_fn 정의
+#     def kiwipiepy_tokenize(text):
+#         try:
+#             cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
+#             tokens = kiwi.tokenize(cleaned_text)
+#             return [token.form for token in tokens]
+#         except (UnicodeDecodeError, AttributeError) as e:
+#             print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+#             # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+#             return []
+#         except Exception as e:
+#             # 예상치 못한 다른 에러 발생 시 처리
+#             print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+#             return []
+
+#     retriever = SparseRetrieval(
+#         tokenize_fn=kiwipiepy_tokenize,
+#         data_path=args.data_path,
+#         context_path=args.context_path,
+#     )
+
+#     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
+
+#     if args.use_faiss:
+
+#         # test single query
+#         with timer("single query by faiss"):
+#             scores, indices = retriever.retrieve_faiss(query)
+
+#         # test bulk
+#         with timer("bulk query by exhaustive search"): 
+#             retriever.get_sparse_embedding()
+#             df = retriever.retrieve_faiss(full_ds)
+#             df["correct"] = df["original_context"] == df["context"]
+
+        
+#             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
+
+#     else:
+#         with timer("bulk query by exhaustive search"): 
+#             def show_differences(str1, str2):
+#                 # 각 문자열을 줄 단위로 나눠서 보여줌
+#                 print("Original Context:\n", repr(str1))
+#                 print("Corrected Context:\n", repr(str2))
+
+#                 # 문자열이 동일하지 않을 경우 차이점을 출력
+#                 if str1 != str2:
+#                     for i, (a, b) in enumerate(zip(str1, str2)):
+#                         if a != b:
+#                             print(f"Difference at index {i}: '{a}' != '{b}'")
+
+            
+#             df = retriever.retrieve(full_ds)
+#             df["correct"] = df["original_context"] == df["first_context"]
+#             # 데이터프레임의 각 행을 비교하고 차이점을 출력
+#             print(
+#                 "correct retrieval result by exhaustive search",
+#                 df["correct"].sum() / len(df),
+#             )
+
+#         with timer("single query by exhaustive search"):
+#             scores, indices = retriever.retrieve(query) 
+
+
+
+# Dense 관련 코드
 if __name__ == "__main__":
-
-    import argparse
-
-    parser = argparse.ArgumentParser(description="")
+    parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
     parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help="", default="../data/train_dataset"
+        "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
     )
     parser.add_argument(
         "--model_name_or_path",
-        metavar="klue/roberta-large",
+        metavar="klue/bert-base",
         type=str,
-        help="", 
-        default="klue/roberta-large",
+        help="Model name or path for PolyEncoder", 
+        default="klue/bert-base",
     )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
+    parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
     parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help="", default="wikipedia_documents.json"
+        "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
     )
-    parser.add_argument("--use_faiss", metavar=False, type=bool, help="", default=False)
+    parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
 
     args = parser.parse_args()
 
-    # Test sparse
+    # Test dataset load
     org_dataset = load_from_disk(args.dataset_name)
     full_ds = concatenate_datasets(
         [
             org_dataset["train"].flatten_indices(),
             org_dataset["validation"].flatten_indices(),
         ]
-    )  # train dev 를 합친 4192 개 질문에 대해 모두 테스트
+    )
     print("*" * 40, "query dataset", "*" * 40)
     print(full_ds)
 
-    # Kiwi 초기화 
-    kiwi = Kiwi()
-
-    # tokenize_fn 정의
-    def kiwipiepy_tokenize(text):
-        try:
-            cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
-            tokens = kiwi.tokenize(cleaned_text)
-            return [token.form for token in tokens]
-        except (UnicodeDecodeError, AttributeError) as e:
-            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
-            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
-            return []
-        except Exception as e:
-            # 예상치 못한 다른 에러 발생 시 처리
-            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
-            return []
-
-    retriever = SparseRetrieval(
-        tokenize_fn=kiwipiepy_tokenize,
+    # Initialize PolyEncoder-based Dense Retrieval
+    retriever = DenseRetrievalPolyEncoder(
+        model_name_or_path=args.model_name_or_path,
         data_path=args.data_path,
-        context_path=args.context_path,
+        context_path=args.context_path, 
+        poly_m=64,  # You can adjust this value based on your needs
+        device="cuda" if torch.cuda.is_available() else "cpu"
     )
 
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
     if args.use_faiss:
-
-        # test single query
+        # FAISS-based retrieval
         with timer("single query by faiss"):
             scores, indices = retriever.retrieve_faiss(query)
 
-        # test bulk
-        with timer("bulk query by exhaustive search"): 
-            retriever.get_sparse_embedding()
-            df = retriever.retrieve_faiss(full_ds)
-            df["correct"] = df["original_context"] == df["context"]
-
-        
-            print("correct retrieval result by faiss", df["correct"].sum() / len(df))
-
+        # Bulk query processing
+        with timer("single query by faiss"): 
+            scores, indices = retriever.retrieve_faiss(query)
+            print(f"Top results for query: {query}")
+            print(scores, indices)
     else:
+        # Exhaustive DPR Search using PolyEncoder
         with timer("bulk query by exhaustive search"): 
             def show_differences(str1, str2):
-                # 각 문자열을 줄 단위로 나눠서 보여줌
                 print("Original Context:\n", repr(str1))
                 print("Corrected Context:\n", repr(str2))
-
-                # 문자열이 동일하지 않을 경우 차이점을 출력
                 if str1 != str2:
                     for i, (a, b) in enumerate(zip(str1, str2)):
                         if a != b:
                             print(f"Difference at index {i}: '{a}' != '{b}'")
 
-            
+            # PolyEncoder-based retrieval for multiple queries
             df = retriever.retrieve(full_ds)
-            df["correct"] = df["original_context"] == df["first_context"]
-            # 데이터프레임의 각 행을 비교하고 차이점을 출력
-            print(
-                "correct retrieval result by exhaustive search",
-                df["correct"].sum() / len(df),
-            )
+            
+            # 데이터프레임의 열 목록을 출력
+            print("df columns: ", df.columns) 
 
+            if df is not None and "original_context" in df.columns and "first_context" in df.columns:
+                df["correct"] = df["original_context"] == df["first_context"]
+                print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
+            else:
+                print("Error: DataFrame doesn't contain required columns")
+
+        # Single query evaluation
         with timer("single query by exhaustive search"):
-            scores, indices = retriever.retrieve(query) 
-
+            scores, indices = retriever.retrieve(query)
+            print("Top scores:", scores)
+            print("Top indices:", indices)
