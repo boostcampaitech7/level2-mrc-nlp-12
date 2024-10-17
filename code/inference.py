@@ -9,6 +9,7 @@ import sys
 from typing import Callable, Dict, List, NoReturn, Tuple
 
 import numpy as np
+from arguments import DataTrainingArguments, ModelArguments
 from datasets import (
     Dataset,
     DatasetDict,
@@ -18,6 +19,8 @@ from datasets import (
     load_from_disk,
     load_metric,
 )
+from retrieval import SparseRetrieval
+from trainer_qa import QuestionAnsweringTrainer
 from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
@@ -28,10 +31,6 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-
-from arguments import DataTrainingArguments, ModelArguments
-from retrieval import SparseRetrieval
-from trainer_qa import QuestionAnsweringTrainer
 from utils_qa import check_no_error, postprocess_qa_predictions
 
 logger = logging.getLogger(__name__)
