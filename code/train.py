@@ -1,3 +1,4 @@
+import wandb
 import logging
 import os
 import sys
@@ -61,6 +62,15 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+    # wandb 설정
+    os.environ["WANDB_PROJECT"]="MRC"       # set the wandb project where this run will be logged
+    os.environ["WANDB_LOG_MODEL"]="true"    # save your trained model checkpoint to wandb
+    os.environ["WANDB_WATCH"]="false"       # turn off watch to log faster
+    training_args.logging_steps = 10		# 로그 기록 주기
+    training_args.eval_steps = training_args.logging_steps
+    training_args.evaluation_strategy = "steps"
+    training_args.report_to = ["wandb"]     # pass "wandb" to the 'report_to' parameter to turn on wandb logging
 
     # verbosity 설정 : Transformers logger의 정보로 사용합니다 (on main process only)
     logger.info("Training/evaluation parameters %s", training_args)
@@ -438,3 +448,4 @@ def run_mrc(
 
 if __name__ == "__main__":
     main()
+    wandb.finish()  # finish the wandb run
