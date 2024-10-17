@@ -8,3 +8,5 @@ assets/
 models/
 outputs/
 wandb/
+.vscode/
+install/

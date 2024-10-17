@@ -5,6 +5,8 @@ tqdm
 pandas
 scikit-learn
 wandb
+gitpython
+pre-commit
 
 # faiss install (if you want to)
 faiss-gpu
