@@ -73,7 +73,7 @@ EM 기준으로 리더보드 등수가 반영되고, F1은 참고용으로만 �
 tar -xzf data.tar.gz
 
 # 필요한 파이썬 패키지 설치.
-pip install -r requirements.txt
+pip install -r code/requirements.txt
 ```
 
 ## pre-commit hooks 설정
@@ -94,6 +94,12 @@ pre-commit 4.0.1
 
 ```zsh
 % pre-commit install
+```
+
+### Troubleshoot
+- pre-commit이 실행되지 않을 경우
+```zsh
+% pre-commit clean && pre-commit install && pre-commit run --all-files
 ```
 
 ## 파일 구성
