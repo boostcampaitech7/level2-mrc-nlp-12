@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 from torch.utils.data import DataLoader 
-from torch.nn.utils.rnn import pad_sequence 
+from torch.nn.utils.rnn import pad_sequence  
 
 
 from contextlib import contextmanager
@@ -400,10 +400,10 @@ class PolyEncoder(nn.Module):
         output = torch.matmul(attn_weights, v)  # [bs, poly_m, dim] 
         return output
     
-    def forward(self, query_input_ids, query_attention_mask, context_input_ids, context_attention_mask):
+    def forward(self, input_ids, attention_mask, context_input_ids, context_attention_mask):
         # Encode the query
-        query_output = self.bert(input_ids=query_input_ids, attention_mask=query_attention_mask).last_hidden_state
-        batch_size = query_input_ids.size(0)
+        query_output = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        batch_size = input_ids.size(0)
 
         # Get poly-code embeddings 
         poly_code_ids = torch.arange(self.poly_m).to(self.device) 
@@ -415,29 +415,39 @@ class PolyEncoder(nn.Module):
 
         # Encode the context (document) 
         context_output = self.bert(input_ids=context_input_ids, attention_mask=context_attention_mask).last_hidden_state 
-        context_emb = context_output[:, 0, :] 
+        context_emb = context_output[:, 0, :]  # [CLS] 토큰
 
         # Dot product between query embedding and context embedding
         scores = torch.matmul(query_emb, context_emb.unsqueeze(-1)).squeeze(-1)  # [bs, poly_m]
         return query_emb, context_emb, scores
 
-
-
-class DenseRetrievalPolyEncoder:
-    def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, margin=2, device="cuda"):
+class DenseRetrievalPolyEncoder(torch.nn.Module):
+    def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, margin=2, device="cuda"): 
+        super(DenseRetrievalPolyEncoder, self).__init__()
         self.model = PolyEncoder(model_name_or_path, poly_m=poly_m, device=device).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
         self.loss_fct = nn.TripletMarginLoss(margin=margin)  # Triplet Margin Loss 적용
         self.data_path = data_path
         self.context_path = context_path
-        self.device = device
+        self.device = device 
+        self.faiss_index = None
     
         # Load Wikipedia data (contexts) from json file
         with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
         # Extract 'text' field from wiki and remove duplicates
-        self.contexts = list(dict.fromkeys([v["text"] for v in wiki.values()]))
+        self.contexts = list(dict.fromkeys([v["text"] for v in wiki.values()])) 
+
+    def build_faiss_index(self, context_embeddings): 
+        # L2 거리를 기반으로 faiss 인덱스 생성하기 
+        dim = context_embeddings.shape[1] 
+        self.faiss_index = faiss.IndexFlatL2(dim) 
+
+        # FAISS 인덱스에 문맥 추가하기 
+        context_embeddings_np = context_embeddings.cpu().numpy() 
+        self.faiss_index.add(context_embeddings_np) 
+        print(f"FAISS 인덱스가 {len(context_embeddings_np)} 개의 문맥 임베딩으로 빌드되었습니다.")
 
     def encode_query_context(self, query, context):
         query_inputs = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True).to(self.device)
@@ -445,42 +455,52 @@ class DenseRetrievalPolyEncoder:
         score = self.model(query_inputs.input_ids, query_inputs.attention_mask, context_inputs.input_ids, context_inputs.attention_mask)
         return score.item()
     
-    def encode_query_context_batch(self, query_batch, context_batch):
-        # 여러 쿼리와 여러 컨텍스트를 배치로 처리
-        query_inputs = self.tokenizer(query_batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-        context_inputs = self.tokenizer(context_batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-
-        # 모델을 이용해 쿼리와 컨텍스트 간의 점수 계산
-        with torch.no_grad():  # 추론이므로 gradient 계산을 하지 않음
-            with torch.cuda.amp.autocast():
-                scores = self.model(
-                    query_inputs.input_ids,
-                    query_inputs.attention_mask,
-                    context_inputs.input_ids,
-                    context_inputs.attention_mask
-                ) 
-                if isinstance(scores, tuple):
-                    scores = scores[0]  # 첫 번째 출력 요소 사용
-                else:
-                    scores = scores
-
-        # GPU에서 계산된 결과를 CPU로 옮긴 뒤 numpy 배열로 변환
-        return scores.cpu().detach().numpy()
+    def encode_query_context_batch(self, queries, contexts):
+        query_embeddings = []  # 쿼리 임베딩 저장소
+        
+        # 문맥 임베딩은 이미 캐싱된 파일에서 불러옴
+        context_embeddings = self.cached_context_embeddings
+        
+        # 쿼리 각각에 대해 임베딩 계산
+        for query in queries:
+            # 쿼리를 토크나이징 후 모델을 통해 임베딩 계산
+            query_inputs = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+            
+            with torch.no_grad():
+                query_embedding, _, _ = self.model(
+                    input_ids=query_inputs.input_ids, attention_mask=query_inputs.attention_mask,
+                    context_input_ids=None, context_attention_mask=None
+                )
+                
+            query_embeddings.append(query_embedding)
+        
+        return query_embeddings, context_embeddings
     
-    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 8): 
+    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 32): 
         print("retrieve를 진행한다 - DRPE")
-        total_results = []
+        total_results = [] 
+
+        # GPU 사용 설정
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # 단일 쿼리 처리
-        if isinstance(query_or_dataset, str): 
+        if isinstance(query_or_dataset, str):
             print("단일 쿼리 처리를 진행한다.")
             scores = []
-            context_batch_size = 16
+            context_batch_size = 32
 
             for start_idx in tqdm(range(0, len(self.contexts), context_batch_size), desc="단일 쿼리 컨텍스트 처리"):
                 context_batch = self.contexts[start_idx:start_idx + context_batch_size]
-                batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch), context_batch)
-                scores.extend(batch_scores)
+                batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch), context_batch) 
+            
+                # batch_scores가 임베딩 벡터일 경우, 코사인 유사도를 사용해 단일 값으로 변환
+                for query_embedding, context_embedding in zip(batch_scores[0], batch_scores[1]):
+                    query_tensor = torch.tensor(query_embedding, dtype=torch.float32).to(device)  # float32로 변환 후 GPU로 이동
+                    context_tensor = torch.tensor(context_embedding, dtype=torch.float32).to(device)  # float32로 변환 후 GPU로 이동
+
+                    # 코사인 유사도 계산
+                    similarity = F.cosine_similarity(query_tensor, context_tensor, dim=-1)
+                    scores.append(similarity.mean().item())  # 단일 값으로 변환 후 저장
   
             # 상위 k개 문서 선택
             topk_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:topk]
@@ -570,6 +590,21 @@ class DenseRetrievalPolyEncoder:
             'negative_context_attention_mask': padded_negative_context_attention_mask,
         }
 
+    def hard_negative_mining(self, query_emb, negative_embs, positive_emb, margin=1.5):
+        """
+        Hard Negative Mining: Negative 샘플 중에서 Positive와 가장 가까운 Negative 샘플을 선택합니다.
+        """
+        query_emb_mean = query_emb.mean(dim=1)
+        # Positive와 Negative 간의 거리를 계산
+        negative_distances = torch.norm(query_emb_mean - negative_embs, dim=1)  # 각 Negative 샘플과의 거리 
+
+        # 가장 가까운 Negative 샘플을 선택
+        hardest_negative_idx = torch.argmin(negative_distances)  # 가장 가까운 Negative 샘플 인덱스
+        hard_negative = negative_embs[hardest_negative_idx]  # Hard Negative 샘플 선택
+        
+        hard_negative = hard_negative.unsqueeze(0) 
+        return hard_negative      
+
     def train_step(self, batch, optimizer, scheduler):
         self.model.train()
         total_loss = 0
@@ -583,20 +618,22 @@ class DenseRetrievalPolyEncoder:
 
         # 쿼리와 문서 임베딩 계산
         query_emb, positive_emb, scores = self.model(query_input_ids, query_attention_mask, positive_context_input_ids, positive_context_attention_mask)
-        _, negative_emb, scores = self.model(query_input_ids, query_attention_mask, negative_context_input_ids, negative_context_attention_mask)
+        _, negative_embs, _ = self.model(query_input_ids, query_attention_mask, negative_context_input_ids, negative_context_attention_mask) 
+
+        # Hard Negative Mining 적용
+        hard_negative = self.hard_negative_mining(query_emb, negative_embs, positive_emb)
 
         # 임베딩 차원이 2D인지 확인 후 연산
         query_emb_mean = query_emb.mean(dim=1) 
         positive_emb_mean = positive_emb
-        negative_emb_mean = negative_emb
 
         # TripletMarginLoss로 손실 계산 
-        loss = self.loss_fct(query_emb_mean, positive_emb_mean, negative_emb_mean)  # 쿼리와 정답 문서 임베딩 간의 거리는 최소화하고, 오답 문서와는 최대화
+        loss = self.loss_fct(query_emb_mean, positive_emb_mean, hard_negative)  # 쿼리와 정답 문서 임베딩 간의 거리는 최소화하고, 오답 문서와는 최대화
 
         # 스코어 값 출력
         if random.random() < 0.05:  # 5% 확률로 스코어 확인
             positive_score = torch.norm(query_emb_mean - positive_emb_mean, p=2)
-            negative_score = torch.norm(query_emb_mean - negative_emb_mean, p=2)
+            negative_score = torch.norm(query_emb_mean - hard_negative, p=2)
             print(f"Positive Score (L2 distance): {positive_score}")
             print(f"Negative Score (L2 distance): {negative_score}")
             print(f"Loss: {loss.item()}")
@@ -610,7 +647,7 @@ class DenseRetrievalPolyEncoder:
 
         return total_loss
 
-    def train_model(self, model, train_dataloader, val_dataloader=None, epochs=3, lr=5e-6, warmup_steps=500):
+    def train_model(self, model, train_dataloader, val_dataloader=None, epochs=1, lr=5e-6, warmup_steps=500):
         # Optimizer와 Scheduler 설정
         optimizer = AdamW(self.model.parameters(), lr=lr)
         total_steps = len(train_dataloader) * epochs
@@ -635,8 +672,131 @@ class DenseRetrievalPolyEncoder:
                 if step % 100 == 0:  # 100 스텝마다 현재 손실 출력
                     print(f"Step {step}, Loss: {loss}")
 
-        
+    def cache_context_embeddings(self):
+        context_embeddings = []
+        for context in tqdm(self.contexts, desc="문맥 임베딩 계산"):
+            context_inputs = self.tokenizer(context, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+            _, context_embedding, _ = self.model(
+                input_ids=context_inputs.input_ids, attention_mask=context_inputs.attention_mask,
+                context_input_ids=context_inputs.input_ids, context_attention_mask=context_inputs.attention_mask
+            )
+            context_embeddings.append(context_embedding.cpu())
+    
+        # 캐시 파일로 저장
+        torch.save(torch.stack(context_embeddings), "cached_context_embeddings.pt")
 
+    def load_cached_context_embeddings(self):
+        self.cached_context_embeddings = torch.load("cached_context_embeddings.pt").to(self.device)
+
+# Dense 관련 코드
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
+    parser.add_argument(
+        "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
+    )
+    parser.add_argument(
+        "--model_name_or_path",
+        metavar="klue/bert-base",
+        type=str,
+        help="Model name or path for PolyEncoder", 
+        default="klue/bert-base",
+    )
+    parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
+    parser.add_argument(
+        "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
+    )
+    parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
+
+    args = parser.parse_args()
+
+    # Test dataset load
+    org_dataset = load_from_disk(args.dataset_name)
+    full_ds = concatenate_datasets(
+        [
+            org_dataset["train"].flatten_indices(),
+            org_dataset["validation"].flatten_indices(),
+        ]
+    )
+    print("*" * 40, "query dataset", "*" * 40)
+    torch.cuda.empty_cache()
+    # Initialize PolyEncoder-based Dense Retrieval
+    retriever = DenseRetrievalPolyEncoder(
+        model_name_or_path=args.model_name_or_path,
+        data_path=args.data_path,
+        context_path=args.context_path, 
+        poly_m=64,  # You can adjust this value based on your needs
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    # 캐시된 문맥 임베딩이 있는지 확인하고, 없으면 임베딩을 계산하여 캐싱
+    if os.path.exists("cached_context_embeddings.pt"):
+        print("캐시된 문맥 임베딩을 불러옵니다.")
+        retriever.load_cached_context_embeddings()
+    else:
+        print("문맥 임베딩을 계산하고 캐싱합니다.")
+        retriever.cache_context_embeddings()
+
+    # 데이터셋에 적용
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    encoded_dataset = full_ds.map(lambda examples: retriever.preprocess_function(examples, tokenizer), batched=True)
+
+    # 학습을 위한 DataLoader 설정
+    train_dataloader = DataLoader(encoded_dataset, batch_size=8, shuffle=True, collate_fn=retriever.custom_collate_fn)
+
+    # 저장된 모델 가중치 파일 경로
+    model_path = "retriever_model.pth"
+
+    # retriever 모델 가중치 로드 및 평가 모드 전환
+    if os.path.exists(model_path):
+        print(f"모델 가중치 '{model_path}' 파일을 불러옵니다.")
+        
+        # 저장된 모델 가중치 불러오기
+        retriever.load_state_dict(torch.load(model_path))
+        retriever.eval()  # 평가 모드로 전환
+        print("모델이 평가 모드로 전환되었습니다.")
+    else:
+        print(f"'{model_path}' 파일이 존재하지 않습니다. 모델을 학습한 후 저장해야 합니다.")
+        # PolyEncoder 모델 학습
+        retriever.train_model(retriever, train_dataloader, None, epochs=1, lr=1e-5) 
+        torch.save(retriever.state_dict(), model_path)
+
+    query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
+
+    if args.use_faiss:
+        # FAISS-based retrieval
+        with timer("single query by faiss"):
+            scores, indices = retriever.retrieve_faiss(query)
+
+        # Bulk query processing
+        with timer("single query by faiss"): 
+            scores, indices = retriever.retrieve_faiss(query)
+            print(f"Top results for query: {query}")
+    else:
+        # Single query evaluation
+        with timer("single query by exhaustive search"):
+            result = retriever.retrieve(query) 
+
+        # Exhaustive DPR Search using PolyEncoder
+        # with timer("bulk query by exhaustive search"): 
+        #     def show_differences(str1, str2):
+        #         print("Original Context:\n", repr(str1))
+        #         print("Corrected Context:\n", repr(str2))
+        #         if str1 != str2:
+        #             for i, (a, b) in enumerate(zip(str1, str2)):
+        #                 if a != b:
+        #                     print(f"Difference at index {i}: '{a}' != '{b}'")
+
+        #     # PolyEncoder-based retrieval for multiple queries
+        #     df = retriever.retrieve(full_ds, topk=5, query_batch_size=2)
+            
+        #     # 데이터프레임의 열 목록을 출력
+        #     print("df columns: ", df.columns) 
+
+        #     if df is not None and "original_context" in df.columns and "first_context" in df.columns:
+        #         df["correct"] = df["original_context"] == df["first_context"]
+        #         print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
+        #     else:
+        #         print("Error: DataFrame doesn't contain required columns")
 
 # BM25 관련 코드
 # if __name__ == "__main__":
@@ -735,109 +895,3 @@ class DenseRetrievalPolyEncoder:
 
 #         with timer("single query by exhaustive search"):
 #             scores, indices = retriever.retrieve(query) 
-
-
-
-# Dense 관련 코드
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
-    parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
-    )
-    parser.add_argument(
-        "--model_name_or_path",
-        metavar="klue/bert-base",
-        type=str,
-        help="Model name or path for PolyEncoder", 
-        default="klue/bert-base",
-    )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
-    parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
-    )
-    parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
-
-    args = parser.parse_args()
-
-    # Test dataset load
-    org_dataset = load_from_disk(args.dataset_name)
-    full_ds = concatenate_datasets(
-        [
-            org_dataset["train"].flatten_indices(),
-            org_dataset["validation"].flatten_indices(),
-        ]
-    )
-    print("*" * 40, "query dataset", "*" * 40)
-    torch.cuda.empty_cache()
-    # Initialize PolyEncoder-based Dense Retrieval
-    retriever = DenseRetrievalPolyEncoder(
-        model_name_or_path=args.model_name_or_path,
-        data_path=args.data_path,
-        context_path=args.context_path, 
-        poly_m=64,  # You can adjust this value based on your needs
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
-
-    # 데이터셋에 적용
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    encoded_dataset = full_ds.map(lambda examples: retriever.preprocess_function(examples, tokenizer), batched=True)
-
-    # 학습을 위한 DataLoader 설정
-    train_dataloader = DataLoader(encoded_dataset, batch_size=8, shuffle=True, collate_fn=retriever.custom_collate_fn)
-
-    # 저장된 모델 가중치 파일 경로
-    model_path = "retriever_model.pth"
-
-    # retriever 모델 가중치 로드 및 평가 모드 전환
-    if os.path.exists(model_path):
-        print(f"모델 가중치 '{model_path}' 파일을 불러옵니다.")
-        
-        # 저장된 모델 가중치 불러오기
-        retriever.load_state_dict(torch.load(model_path))
-        retriever.eval()  # 평가 모드로 전환
-        print("모델이 평가 모드로 전환되었습니다.")
-    else:
-        print(f"'{model_path}' 파일이 존재하지 않습니다. 모델을 학습한 후 저장해야 합니다.")
-        # PolyEncoder 모델 학습
-        retriever.train_model(retriever, train_dataloader, None, epochs=3, lr=5e-5) 
-        torch.save(retriever.state_dict(), model_path)
-
-    query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
-
-    if args.use_faiss:
-        # FAISS-based retrieval
-        with timer("single query by faiss"):
-            scores, indices = retriever.retrieve_faiss(query)
-
-        # Bulk query processing
-        with timer("single query by faiss"): 
-            scores, indices = retriever.retrieve_faiss(query)
-            print(f"Top results for query: {query}")
-            print(scores, indices)
-    else:
-
-        # Single query evaluation
-        with timer("single query by exhaustive search"):
-            scores, indices = retriever.retrieve(query)
-
-        # Exhaustive DPR Search using PolyEncoder
-        with timer("bulk query by exhaustive search"): 
-            def show_differences(str1, str2):
-                print("Original Context:\n", repr(str1))
-                print("Corrected Context:\n", repr(str2))
-                if str1 != str2:
-                    for i, (a, b) in enumerate(zip(str1, str2)):
-                        if a != b:
-                            print(f"Difference at index {i}: '{a}' != '{b}'")
-
-            # PolyEncoder-based retrieval for multiple queries
-            df = retriever.retrieve(full_ds, topk=5, query_batch_size=2)
-            
-            # 데이터프레임의 열 목록을 출력
-            print("df columns: ", df.columns) 
-
-            if df is not None and "original_context" in df.columns and "first_context" in df.columns:
-                df["correct"] = df["original_context"] == df["first_context"]
-                print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
-            else:
-                print("Error: DataFrame doesn't contain required columns")

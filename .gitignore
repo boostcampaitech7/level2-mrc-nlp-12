@@ -2,4 +2,6 @@ data
 assets
 models
 outputs
-code/__pycache__
+retriever_model.pth
+code/__pycache__ 
+code/retriever_model.pth
