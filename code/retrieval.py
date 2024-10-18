@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 from torch.utils.data import DataLoader 
-from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pad_sequence 
 
 
 from contextlib import contextmanager
@@ -475,7 +475,7 @@ class DenseRetrievalPolyEncoder:
         if isinstance(query_or_dataset, str): 
             print("단일 쿼리 처리를 진행한다.")
             scores = []
-            context_batch_size = 64
+            context_batch_size = 16
 
             for start_idx in tqdm(range(0, len(self.contexts), context_batch_size), desc="단일 쿼리 컨텍스트 처리"):
                 context_batch = self.contexts[start_idx:start_idx + context_batch_size]
@@ -768,7 +768,7 @@ if __name__ == "__main__":
         ]
     )
     print("*" * 40, "query dataset", "*" * 40)
-
+    torch.cuda.empty_cache()
     # Initialize PolyEncoder-based Dense Retrieval
     retriever = DenseRetrievalPolyEncoder(
         model_name_or_path=args.model_name_or_path,
@@ -783,7 +783,7 @@ if __name__ == "__main__":
     encoded_dataset = full_ds.map(lambda examples: retriever.preprocess_function(examples, tokenizer), batched=True)
 
     # 학습을 위한 DataLoader 설정
-    train_dataloader = DataLoader(encoded_dataset, batch_size=32, shuffle=True, collate_fn=retriever.custom_collate_fn)
+    train_dataloader = DataLoader(encoded_dataset, batch_size=8, shuffle=True, collate_fn=retriever.custom_collate_fn)
 
     # 저장된 모델 가중치 파일 경로
     model_path = "retriever_model.pth"
