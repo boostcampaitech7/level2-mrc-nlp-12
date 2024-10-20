@@ -7,6 +7,7 @@ from datasets import load_from_disk, concatenate_datasets
 from poly_enc import PolyEncoder
 from tqdm import tqdm
 from transformers import BertTokenizer
+from torch.utils.data import DataLoader
 
 if __name__ == "__main__": 
   parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
@@ -61,21 +62,85 @@ if __name__ == "__main__":
     return chunks
 
   tokenizer = BertTokenizer.from_pretrained("klue/bert-base")
+  
+  # DataLoder를 생성한다 (배치 크기 설정)
+  batch_size = 4  # 상황에 따라 최적화 필요
+  corpus_dataloader = DataLoader(corpus_texts, batch_size=batch_size, shuffle=False) 
+  
+  # GPU/CPU 설정 
+  device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+  poly_encoder.to(device) 
+  
+# 임베딩을 저장할 파일 경로 설정
+embedding_file = "context_embeddings_poly_encoder.pt"
+embedding_dir = "context_embeddings" 
+embedding_file = os.path.join(embedding_dir, "context_embeddings_poly_encoder.pt")
 
-  # 코퍼스를 인코딩한다. 
-  context_embeddings = [] 
-  for text in tqdm(corpus_texts, desc="코퍼스 인코딩: "):
-    # text를 토크나이징한다
-    # tok_ids = tokenizer(text, return_tensors='pt', padding=True, truncation=True, max_length=512)["input_ids"].squeeze(0)
-    chunks = sliding_window_tokenizer(text, tokenizer)
-    chunk_embeddings = []
+# 파일이 존재하는지 확인하고 불러오기
+if os.path.exists(embedding_file):
+    print("임베딩 파일을 불러옵니다...")
+    # 모든 임베딩 파일을 불러와서 병합
+    context_embeddings = []
+    for file_name in tqdm(sorted(os.listdir(embedding_dir)), desc="임베딩 파일 불러오는 중..."):
+      if file_name.startswith("context_embeddings_") and file_name.endswith(".pt"):
+          file_path = os.path.join(embedding_dir, file_name)
+          context_embeddings.extend(torch.load(file_path))
+else:
+    print("임베딩 파일이 없으므로 새로 생성합니다...")
+    # 코퍼스를 인코딩한다. 
+    context_embeddings = []
+    
+    save_interval = 1000  # 임베딩 1000개마다 저장
+    batch_count = 0
+    
+    for batch_text in tqdm(corpus_dataloader, desc="코퍼스 인코딩: "):
+      for text in batch_text:
+        # 문서의 첫 512 토큰만 인코딩
+        tok_ids = tokenizer.encode(
+          text, add_special_tokens=True, max_length=512, truncation=True, return_tensors="pt").to(device)
 
-    for chunk in chunks: 
-      tok_ids = chunk.unsqueeze(0) # 배치 차원을 추가 
-      encoded_chunk = poly_encoder.context_encoder(tok_ids)
-
-      # 인코딩하고 결과를 저장한다 (배치 단위로 처리하는 것도 고려)
-      chunk_embeddings.append(encoded_chunk)
+        with torch.no_grad():
+          encoded_text = poly_encoder.context_encoder(tok_ids)
+            
+        # 인코딩 결과를 저장
+        context_embeddings.append(encoded_text.cpu())
+        
+        # 메모리를 절약하기 위해 일정 수의 임베딩마다 저장
+        batch_count += 1
+        if batch_count % save_interval == 0:
+          partial_file = os.path.join(embedding_dir, f"context_embeddings_{batch_count}.pt")
+          torch.save(context_embeddings, partial_file)
+          print(f"임베딩을 {partial_file} 파일에 부분 저장했습니다.")
+          context_embeddings = []  # 메모리 해제
+    
+    # 마지막 남은 임베딩 파일로 저장   
+    if context_embeddings:   
+      torch.save(context_embeddings, embedding_file)
+      print(f"임베딩을 {embedding_file} 파일에 저장했습니다.")
       
-    context_embedding = torch.mean(torch.stack(chunk_embeddings), dim=0) 
-    context_embeddings.append(context_embedding)
+# 질문 임베딩 생성
+question = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
+question_tokens = tokenizer(question, return_tensors="pt", truncation=True, padding=True, max_length=512).input_ids.to(device) 
+with torch.no_grad():
+    question_embedding = poly_encoder.cand_encoder(question_tokens)
+    
+# 유사도 계산 (예: dot-product)
+scores = []
+for context_embedding in tqdm(context_embeddings, desc="유사도 계산: "): 
+    context_embedding = context_embedding.to(device)
+    
+    question_vector = torch.mean(question_embedding, dim=(0, 1))
+    context_vector = torch.mean(context_embedding, dim=(0, 1))
+
+    similarity = torch.dot(question_vector, context_vector)
+    scores.append(similarity.item())
+    
+# 상위 n개 문서 선택
+top_k = 5
+top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k] 
+
+for idx in top_indices:
+    print(f"Top Document {idx + 1}:") 
+    print(f"Scores: {scores[idx]}")
+    print(corpus_texts[idx])  # corpus_texts에서 상위 문서의 내용을 출력
+    print("=" * 50)
