@@ -6,4 +6,5 @@ retriever_model.pth
 code/__pycache__ 
 code/retriever_model.pth 
 code/cached_context_embeddings.pt 
-code/context_embeddings
+code/context_embeddings 
+code/saved_models

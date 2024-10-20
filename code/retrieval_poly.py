@@ -72,12 +72,16 @@ def train_polyencoder(poly_encoder, train_dataloader, tokenizer, num_epochs=3, l
           loss.backward()
           optimizer.step()
 
-          total_loss += loss.item()
-          
-        avg_loss = total_loss / len(train_dataloader)
-        print(f"Positive similarities: {positive_similarity}")
-        print(f"Negative similarities: {negative_similarities}")
-        print(f"Epoch {epoch + 1} - Average Loss: {avg_loss}")
+          total_loss += loss.item()  
+      avg_loss = total_loss / len(train_dataloader)
+      print(f"Positive similarities: {positive_similarity}")
+      print(f"Negative similarities: {negative_similarities}")
+      print(f"Epoch {epoch + 1} - Average Loss: {avg_loss}")
+      
+      # 모델 저장 (매 에포크마다 저장할 수도 있음)
+      save_path = f"./saved_models/poly_encoder_epoch_{epoch + 1}.pth"
+      torch.save(poly_encoder.state_dict(), save_path)
+      print(f"Model saved to {save_path}")
         
         
         
@@ -121,7 +125,14 @@ if __name__ == "__main__":
   )
 
   # 인스턴스를 생성한다. 
-  poly_encoder = PolyEncoder(args, model_name="klue/roberta-large", pooling_method="first", n_codes=64)
+  poly_encoder = PolyEncoder(args, model_name="klue/roberta-large", pooling_method="first", n_codes=64) 
+  
+  # 저장된 모델 불러오기 (학습이 완료된 후 모델을 재사용할 때)
+  load_path = "./saved_models/poly_encoder_epoch_3.pth"  # 필요한 에포크의 파일 경로
+  if os.path.exists(load_path):
+      poly_encoder.load_state_dict(torch.load(load_path))
+      poly_encoder.eval()  # 평가 모드로 전환
+      print(f"Model loaded from {load_path}")
 
   # 토크나이저를 준비한다. -> 시스템 제한 에러가 발생해서 일단 보류함
   # def sliding_window_tokenizer(text, tokenizer, max_length=512, stride=256):
@@ -149,9 +160,10 @@ if __name__ == "__main__":
   
   train_dataloader = DataLoader(
     org_dataset["train"].flatten_indices(), batch_size=8, shuffle=True)
-  optimizer = torch.optim.Adam(poly_encoder.parameters(), lr=1e-5)
   
-  # 학습 함수 호출
+  # 학습 함수 호출 
+  load_path = "./saved_models/poly_encoder_epoch_3.pth" 
+  
   train_polyencoder(poly_encoder, train_dataloader, tokenizer, num_epochs=3, learning_rate=1e-5, device='cuda')
   
 
