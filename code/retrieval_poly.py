@@ -1,7 +1,8 @@
 import argparse
 import os
 import json
-import torch 
+import torch
+import torch.nn.functional as F
 
 from datasets import load_from_disk, concatenate_datasets
 from poly_enc import PolyEncoder
@@ -10,13 +11,14 @@ from torch.optim import AdamW
 from transformers import AutoTokenizer
 from torch.utils.data import DataLoader 
 
+
 # Hard Negative Mining -> Gold Negative 활용
 def train_polyencoder(poly_encoder, train_dataloader, tokenizer, num_epochs=3, learning_rate=1e-5, device='cuda'): 
     # Optimizer 정의
     optimizer = AdamW(poly_encoder.parameters(), lr=learning_rate) 
     
     # 손실 함수 정의 (여기서는 Cosine Embedding Loss를 사용)
-    criterion = torch.nn.CosineEmbeddingLoss()
+    criterion = torch.nn.MSELoss()
     
     # 모델을 학습 모드로 설정
     poly_encoder.train()
@@ -25,57 +27,53 @@ def train_polyencoder(poly_encoder, train_dataloader, tokenizer, num_epochs=3, l
       total_loss = 0.0
       
       for batch in tqdm(train_dataloader, desc=f"Training 에폭: {epoch + 1}"): 
-        optimizer.zero_grad() 
+        optimizer.zero_grad()
+        
+        # 배치 내의 모든 질문과 컨텍스트를 토크나이징
+        questions_input = tokenizer(batch['question'], return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
+        contexts_input = tokenizer(batch['context'], return_tensors="pt", truncation=True, padding=True, max_length=512).to(device) 
+        negative_contexts_input = contexts_input['input_ids'].roll(shifts=1, dims=0)  # 샘플로 롤링
 
-        # 배치 데이터 가져오기
-        for batch_index, question in enumerate(batch['question']):
-          
-          positive_context = batch['context'][batch_index]
-          negative_contexts = [context for i, context in enumerate(batch['context']) if i != batch_index]
-          
-          # 질문 및 컨텍스트를 토크나이징
-          question_input = tokenizer(question, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
-          positive_input = tokenizer(positive_context, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
-          negative_inputs = [tokenizer(neg, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device) for neg in negative_contexts] 
-          
-          # Poly Encoder 모델을 통해 임베딩 생성
-          positive_embedding = poly_encoder.context_encoder(positive_input['input_ids'])
-          question_embedding = poly_encoder.cand_encoder(question_input['input_ids'])
-          
-          # Negative embedding 생성
-          negative_embeddings = [poly_encoder.context_encoder(neg_input['input_ids']) for neg_input in negative_inputs]
-          
-          # Positive와 Negative의 유사도 계산
-          positive_similarity = torch.cosine_similarity(
-              torch.mean(question_embedding, dim=1),
-              torch.mean(positive_embedding, dim=1)
-          )
-          
-          # 목표 값 설정
-          negative_similarities = torch.stack([
-              torch.cosine_similarity(
-                  torch.mean(question_embedding, dim=1),
-                  torch.mean(neg_emb, dim=1)
-              ) for neg_emb in negative_embeddings
-          ])
-          batch_size = negative_similarities.size(0)
-          target_positive = torch.ones(batch_size, device=device)  # Positive 유사도는 1이어야 함
-          target_negative = -torch.ones(batch_size, device=device)  # Negative 유사도는 -1이어야 함
-          positive_similarities_expanded = positive_similarity.expand_as(negative_similarities)
-    
-          # 손실 계산 (positive_similarity는 1로, negative_similarities는 -1로 레이블링)
-          loss_positive = criterion(positive_similarities_expanded, negative_similarities, target_positive)
-          loss_negative = criterion(negative_similarities, negative_similarities, target_negative)
+        
+        # Poly Encoder 모델을 통해 임베딩 생성
+        question_embeddings = poly_encoder.cand_encoder(questions_input['input_ids'])[:, 0, :]
+        context_embeddings = poly_encoder.context_encoder(contexts_input['input_ids'])[:, 0, :]
+        negative_embeddings = poly_encoder.context_encoder(negative_contexts_input)[:, 0, :]
+        
+        # 벡터 정규화
+        question_embeddings = F.normalize(question_embeddings, p=2, dim=-1)
+        context_embeddings = F.normalize(context_embeddings, p=2, dim=-1)
+        negative_embeddings = F.normalize(negative_embeddings, p=2, dim=-1)
 
-          # 최종 손실
-          loss = (loss_positive + loss_negative) / 2
-          loss.backward()
-          optimizer.step()
+        # Positive와 Negative 임베딩 간의 유사도 계산 
+        # Shape: [batch_size, embedding_dim]
+        positive_similarity = torch.sum(question_embeddings * context_embeddings, dim=-1, keepdim=True)
 
-          total_loss += loss.item()  
+        # Negative 유사도 계산 (Dot Product)
+        negative_similarity = torch.sum(question_embeddings.unsqueeze(1) * negative_embeddings, dim=-1)
+        
+        combined_similarities = torch.cat(
+          [positive_similarity, negative_similarity.view(-1, 1)], dim=0) 
+      
+        # 손실 계산을 위한 target 설정 및 손실 계산
+        batch_size = positive_similarity.size(0)  # batch size를 얻음
+        num_negatives = negative_similarity.size(1)  # negative samples의 개수 얻음 
+        
+        # 손실 계산을 위한 target 설정 및 손실 계산
+        target = torch.cat([
+            torch.ones(batch_size, 1, device=device),  # Positive -> 1
+            torch.zeros(batch_size * num_negatives, 1, device=device)  # Negative -> 0
+        ])
+        
+        # 손실 계산
+        loss = criterion(combined_similarities, target)
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+      
       avg_loss = total_loss / len(train_dataloader)
-      print(f"Positive similarities: {positive_similarity}")
-      print(f"Negative similarities: {negative_similarities}")
       print(f"Epoch {epoch + 1} - Average Loss: {avg_loss}")
       
       # 모델 저장 (매 에포크마다 저장할 수도 있음)
@@ -151,7 +149,7 @@ if __name__ == "__main__":
   tokenizer = AutoTokenizer.from_pretrained("klue/roberta-large")
   
   # DataLoder를 생성한다 (배치 크기 설정)
-  batch_size = 4  # 상황에 따라 최적화 필요
+  batch_size = 2  # 상황에 따라 최적화 필요
   corpus_dataloader = DataLoader(corpus_texts, batch_size=batch_size, shuffle=False) 
   
   # GPU/CPU 설정 
@@ -159,7 +157,7 @@ if __name__ == "__main__":
   poly_encoder.to(device)
   
   train_dataloader = DataLoader(
-    org_dataset["train"].flatten_indices(), batch_size=8, shuffle=True)
+    org_dataset["train"].flatten_indices(), batch_size=4, shuffle=True)
   
   # 학습 함수 호출 
   load_path = "./saved_models/poly_encoder_epoch_3.pth" 
