@@ -400,26 +400,47 @@ class PolyEncoder(nn.Module):
         output = torch.matmul(attn_weights, v)  # [bs, poly_m, dim] 
         return output
     
-    def forward(self, input_ids, attention_mask, context_input_ids, context_attention_mask):
-        # Encode the query
-        query_output = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        batch_size = input_ids.size(0)
+    def forward(self, input_ids=None, attention_mask=None, context_input_ids=None, context_attention_mask=None):
+        # 쿼리 임베딩만 계산하는 경우
+        if input_ids is not None and context_input_ids is None:
+            query_output = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            batch_size = input_ids.size(0)
 
-        # Get poly-code embeddings 
-        poly_code_ids = torch.arange(self.poly_m).to(self.device) 
-        poly_code_ids = poly_code_ids.unsqueeze(0).expand(batch_size, self.poly_m)  # [bs, poly_m]
-        poly_codes = self.poly_code_embeddings(poly_code_ids)  # [bs, poly_m, dim]
+            # Poly-code embeddings 생성
+            poly_code_ids = torch.arange(self.poly_m).to(self.device)
+            poly_code_ids = poly_code_ids.unsqueeze(0).expand(batch_size, self.poly_m)  # [bs, poly_m]
+            poly_codes = self.poly_code_embeddings(poly_code_ids)  # [bs, poly_m, dim]
 
-        # Apply dot attention between poly-codes and query hidden states
-        query_emb = self.dot_attention(poly_codes, query_output, query_output) 
+            # Dot attention 적용
+            query_emb = self.dot_attention(poly_codes, query_output, query_output)
+            return query_emb
 
-        # Encode the context (document) 
-        context_output = self.bert(input_ids=context_input_ids, attention_mask=context_attention_mask).last_hidden_state 
-        context_emb = context_output[:, 0, :]  # [CLS] 토큰
+        # 문맥 임베딩만 계산하는 경우
+        elif context_input_ids is not None and input_ids is None:
+            context_output = self.bert(input_ids=context_input_ids, attention_mask=context_attention_mask).last_hidden_state
+            context_emb = context_output[:, 0, :]  # [CLS] 토큰 사용
+            return context_emb
 
-        # Dot product between query embedding and context embedding
-        scores = torch.matmul(query_emb, context_emb.unsqueeze(-1)).squeeze(-1)  # [bs, poly_m]
-        return query_emb, context_emb, scores
+        # 쿼리와 문맥 임베딩 모두가 주어진 경우 (정규 forward, 점수 계산)
+        elif input_ids is not None and context_input_ids is not None:
+            query_output = self.bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            batch_size = input_ids.size(0)
+
+            # Poly-code embeddings 생성
+            poly_code_ids = torch.arange(self.poly_m).to(self.device)
+            poly_code_ids = poly_code_ids.unsqueeze(0).expand(batch_size, self.poly_m)  # [bs, poly_m]
+            poly_codes = self.poly_code_embeddings(poly_code_ids)  # [bs, poly_m, dim]
+
+            # Dot attention 적용
+            query_emb = self.dot_attention(poly_codes, query_output, query_output)
+
+            # 문맥 임베딩 계산
+            context_output = self.bert(input_ids=context_input_ids, attention_mask=context_attention_mask).last_hidden_state
+            context_emb = context_output[:, 0, :]  # [CLS] 토큰
+
+            # 쿼리와 문맥 임베딩 간의 점수 계산
+            scores = torch.matmul(query_emb, context_emb.unsqueeze(-1)).squeeze(-1)  # [bs, poly_m]
+            return query_emb, context_emb, scores
 
 class DenseRetrievalPolyEncoder(torch.nn.Module):
     def __init__(self, model_name_or_path, data_path, context_path, poly_m=64, margin=2, device="cuda"): 
@@ -455,28 +476,28 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
         score = self.model(query_inputs.input_ids, query_inputs.attention_mask, context_inputs.input_ids, context_inputs.attention_mask)
         return score.item()
     
-    def encode_query_context_batch(self, queries, contexts):
+    def encode_query_context_batch(self, queries):
         query_embeddings = []  # 쿼리 임베딩 저장소
         
-        # 문맥 임베딩은 이미 캐싱된 파일에서 불러옴
-        context_embeddings = self.cached_context_embeddings
-        
-        # 쿼리 각각에 대해 임베딩 계산
+        # 쿼리와 문맥 각각에 대해 임베딩 계산
         for query in queries:
             # 쿼리를 토크나이징 후 모델을 통해 임베딩 계산
             query_inputs = self.tokenizer(query, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-            
+
             with torch.no_grad():
-                query_embedding, _, _ = self.model(
-                    input_ids=query_inputs.input_ids, attention_mask=query_inputs.attention_mask,
-                    context_input_ids=None, context_attention_mask=None
+                query_embedding = self.model(
+                    input_ids=query_inputs["input_ids"], 
+                    attention_mask=query_inputs["attention_mask"]
                 )
-                
+            
             query_embeddings.append(query_embedding)
-        
+
+        # 캐시된 문맥 임베딩 불러오기
+        context_embeddings = self.cached_context_embeddings
+
         return query_embeddings, context_embeddings
-    
-    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 32): 
+
+    def retrieve(self, query_or_dataset, topk: int = 5, query_batch_size: int = 8): 
         print("retrieve를 진행한다 - DRPE")
         total_results = [] 
 
@@ -487,11 +508,11 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
         if isinstance(query_or_dataset, str):
             print("단일 쿼리 처리를 진행한다.")
             scores = []
-            context_batch_size = 32
+            context_batch_size = 16
 
             for start_idx in tqdm(range(0, len(self.contexts), context_batch_size), desc="단일 쿼리 컨텍스트 처리"):
                 context_batch = self.contexts[start_idx:start_idx + context_batch_size]
-                batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch), context_batch) 
+                batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch)) 
             
                 # batch_scores가 임베딩 벡터일 경우, 코사인 유사도를 사용해 단일 값으로 변환
                 for query_embedding, context_embedding in zip(batch_scores[0], batch_scores[1]):
@@ -672,18 +693,21 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
                 if step % 100 == 0:  # 100 스텝마다 현재 손실 출력
                     print(f"Step {step}, Loss: {loss}")
 
-    def cache_context_embeddings(self):
+    def cache_context_embeddings(self, batch_size=16):  # 배치 크기 조정 가능
         context_embeddings = []
-        for context in tqdm(self.contexts, desc="문맥 임베딩 계산"):
-            context_inputs = self.tokenizer(context, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
-            _, context_embedding, _ = self.model(
-                input_ids=context_inputs.input_ids, attention_mask=context_inputs.attention_mask,
-                context_input_ids=context_inputs.input_ids, context_attention_mask=context_inputs.attention_mask
-            )
+        for start_idx in tqdm(range(0, len(self.contexts), batch_size), desc="문맥 임베딩 계산"):
+            context_batch = self.contexts[start_idx:start_idx + batch_size]
+            context_inputs = self.tokenizer(context_batch, return_tensors="pt", padding=True, truncation=True, max_length=512).to(self.device)
+            
+            with torch.no_grad():  # 메모리 절약을 위해 no_grad 사용
+                _, context_embedding, _ = self.model(
+                    input_ids=context_inputs.input_ids, attention_mask=context_inputs.attention_mask,
+                    context_input_ids=context_inputs.input_ids, context_attention_mask=context_inputs.attention_mask
+                )
             context_embeddings.append(context_embedding.cpu())
-    
+        
         # 캐시 파일로 저장
-        torch.save(torch.stack(context_embeddings), "cached_context_embeddings.pt")
+        torch.save(torch.cat(context_embeddings), "cached_context_embeddings.pt")
 
     def load_cached_context_embeddings(self):
         self.cached_context_embeddings = torch.load("cached_context_embeddings.pt").to(self.device)
@@ -728,38 +752,6 @@ if __name__ == "__main__":
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    # 캐시된 문맥 임베딩이 있는지 확인하고, 없으면 임베딩을 계산하여 캐싱
-    if os.path.exists("cached_context_embeddings.pt"):
-        print("캐시된 문맥 임베딩을 불러옵니다.")
-        retriever.load_cached_context_embeddings()
-    else:
-        print("문맥 임베딩을 계산하고 캐싱합니다.")
-        retriever.cache_context_embeddings()
-
-    # 데이터셋에 적용
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    encoded_dataset = full_ds.map(lambda examples: retriever.preprocess_function(examples, tokenizer), batched=True)
-
-    # 학습을 위한 DataLoader 설정
-    train_dataloader = DataLoader(encoded_dataset, batch_size=8, shuffle=True, collate_fn=retriever.custom_collate_fn)
-
-    # 저장된 모델 가중치 파일 경로
-    model_path = "retriever_model.pth"
-
-    # retriever 모델 가중치 로드 및 평가 모드 전환
-    if os.path.exists(model_path):
-        print(f"모델 가중치 '{model_path}' 파일을 불러옵니다.")
-        
-        # 저장된 모델 가중치 불러오기
-        retriever.load_state_dict(torch.load(model_path))
-        retriever.eval()  # 평가 모드로 전환
-        print("모델이 평가 모드로 전환되었습니다.")
-    else:
-        print(f"'{model_path}' 파일이 존재하지 않습니다. 모델을 학습한 후 저장해야 합니다.")
-        # PolyEncoder 모델 학습
-        retriever.train_model(retriever, train_dataloader, None, epochs=1, lr=1e-5) 
-        torch.save(retriever.state_dict(), model_path)
-
     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
     if args.use_faiss:
@@ -774,7 +766,15 @@ if __name__ == "__main__":
     else:
         # Single query evaluation
         with timer("single query by exhaustive search"):
+            if os.path.exists("cached_context_embeddings.pt"):
+                print("캐시된 문맥 임베딩을 불러옵니다.")
+                retriever.load_cached_context_embeddings()
+            else:
+                print("문맥 임베딩을 계산하고 캐싱합니다.")
+                retriever.cache_context_embeddings()
+
             result = retriever.retrieve(query) 
+            print(result)
 
         # Exhaustive DPR Search using PolyEncoder
         # with timer("bulk query by exhaustive search"): 

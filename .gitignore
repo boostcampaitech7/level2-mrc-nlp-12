@@ -4,4 +4,5 @@ models
 outputs
 retriever_model.pth
 code/__pycache__ 
-code/retriever_model.pth
+code/retriever_model.pth 
+code/cached_context_embeddings.pt
