@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F 
 
-from transformers import BertModel 
+from transformers import AutoModel 
 
 class BertEmbeddings(nn.Module): 
   def __init__(self, model_name, **kwargs): 
     super().__init__() 
-    self.model = BertModel.from_pretrained(model_name) 
+    self.model = AutoModel.from_pretrained(model_name) 
     self.pad_token_id = kwargs['pad_token_id'] 
 
   def forward(self, tok_ids):

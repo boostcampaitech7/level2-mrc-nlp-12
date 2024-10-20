@@ -5,8 +5,9 @@ import torch
 
 from datasets import load_from_disk, concatenate_datasets
 from poly_enc import PolyEncoder
-from tqdm import tqdm
-from transformers import BertTokenizer
+from tqdm import tqdm 
+import torch.nn as nn
+from transformers import AutoTokenizer
 from torch.utils.data import DataLoader
 
 if __name__ == "__main__": 
@@ -16,17 +17,17 @@ if __name__ == "__main__":
   )    
   parser.add_argument(
         "--model_name_or_path",
-        metavar="klue/bert-base",
+        metavar="klue/roberta-large",
         type=str,
         help="Model name or path for PolyEncoder", 
-        default="klue/bert-base",
+        default="klue/roberta-large",
   )
   parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
   parser.add_argument(
         "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
   )
   parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
-  parser.add_argument("--embed_size", metavar=768, type=bool, help="Use FAISS for retrieval", default=768)
+  parser.add_argument("--embed_size", metavar=1024, type=bool, help="Use FAISS for retrieval", default=1024)
 
   args = parser.parse_args()
 
@@ -45,7 +46,7 @@ if __name__ == "__main__":
   )
 
   # 인스턴스를 생성한다. 
-  poly_encoder = PolyEncoder(args, model_name="klue/bert-base", pooling_method="first", n_codes=64)
+  poly_encoder = PolyEncoder(args, model_name="klue/roberta-large", pooling_method="first", n_codes=64)
 
   # 토크나이저를 준비한다.
   def sliding_window_tokenizer(text, tokenizer, max_length=512, stride=256):
@@ -61,7 +62,7 @@ if __name__ == "__main__":
 
     return chunks
 
-  tokenizer = BertTokenizer.from_pretrained("klue/bert-base")
+  tokenizer = AutoTokenizer.from_pretrained("klue/roberta-large")
   
   # DataLoder를 생성한다 (배치 크기 설정)
   batch_size = 4  # 상황에 따라 최적화 필요
