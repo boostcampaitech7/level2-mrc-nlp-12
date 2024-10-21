@@ -157,13 +157,12 @@ class SparseRetrieval:
 
         elif isinstance(query_or_dataset, Dataset):
             # 여러 쿼리 처리
-            total = [] 
-            queries = query_or_dataset["question"] 
+            total = []
 
-            print("query or dataset: ", query_or_dataset)
 
-            # 이거 나중에 에러 없는 경우에는 queries[:100] -> queries로 변경하기
-            for idx, query in enumerate(tqdm(queries, desc="BM25 retrieval")):
+            # 이거 나중에 에러 없는 경우에는 queries[:50] -> queries로 변경하기
+            for idx, example in enumerate(tqdm(query_or_dataset, desc="BM25 retrieval")):
+                query = example["question"]
                 tokenized_query = self.tokenize_fn(query)
                 doc_scores = self.BM25.get_scores(tokenized_query)
                 topk_indices = np.argsort(doc_scores)[::-1][:topk]
@@ -171,18 +170,16 @@ class SparseRetrieval:
                 tmp = {
                     "question": query,
                     "id": query_or_dataset["id"][idx],
-                    "context": " ".join([self.contexts[i] for i in topk_indices]), 
-                    "first_context": self.contexts[topk_indices[0]]
+                    "context": " ".join([self.contexts[i] for i in topk_indices])
                 }
-
                 
-                if "context" in query_or_dataset.features and "answers" in query_or_dataset.features:
-                    tmp["original_context"] = query_or_dataset["context"][idx]
-                    tmp["answers"] = query_or_dataset["answers"][idx]
+                if "answers" in example.keys():
+                    tmp["answers"] = example["answers"]
                 total.append(tmp)
-
-            return pd.DataFrame(total)
-
+                
+            cqas = pd.DataFrame(total)  
+            return cqas
+        
     def get_relevant_doc(self, query: str, k: Optional[int] = 1) -> Tuple[List, List]:
 
         """
