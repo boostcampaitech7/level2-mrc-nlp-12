@@ -90,7 +90,8 @@ def main():
         try:
             cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
             tokens = kiwi.tokenize(cleaned_text)
-            return [token.form for token in tokens]
+            token_forms = [token.form for token in tokens]
+            return token_forms + bigrams
         except (UnicodeDecodeError, AttributeError) as e:
             print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
             # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
@@ -107,7 +108,7 @@ def main():
     )
 
     # True일 경우 : run passage retrieval
-    if data_args.eval_retrieval:
+    if data_args.eval_retrieval: 
         datasets = run_sparse_retrieval(
             kiwipiepy_tokenize, datasets, training_args, data_args,
         )
@@ -131,14 +132,15 @@ def run_sparse_retrieval(
         tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
     )
 
-    if data_args.use_faiss:
-        retriever.build_faiss(num_clusters=data_args.num_clusters)
-        df = retriever.retrieve_faiss(
-            datasets["validation"], topk=data_args.top_k_retrieval
-        )
-    else:
-        df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
-
+    # if data_args.use_faiss:
+    #     retriever.build_faiss(num_clusters=data_args.num_clusters)
+    #     df = retriever.retrieve_faiss(
+    #         datasets["validation"], topk=data_args.top_k_retrieval
+    #     )
+    # else:
+    
+    df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval) 
+    
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
         f = Features(
