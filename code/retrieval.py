@@ -511,7 +511,7 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
                 context_batch = self.contexts[start_idx:start_idx + context_batch_size]
                 batch_scores = self.encode_query_context_batch([query_or_dataset] * len(context_batch)) 
             
-                # batch_scores가 임베딩 벡터일 경우, 코사인 유사도를 사용해 단일 값으로 변환
+                # batch_scores가 임베딩 벡터일 경우, 유사도를 사용해 단일 값으로 변환
                 for query_embedding, context_embedding in zip(batch_scores[0], batch_scores[1]):
                     query_tensor = torch.tensor(query_embedding, dtype=torch.float32).to(device)  # float32로 변환 후 GPU로 이동
                     context_tensor = torch.tensor(context_embedding, dtype=torch.float32).to(device)  # float32로 변환 후 GPU로 이동
@@ -773,27 +773,28 @@ if __name__ == "__main__":
             result = retriever.retrieve(query) 
             print(result)
 
-        # Exhaustive DPR Search using PolyEncoder
-        # with timer("bulk query by exhaustive search"): 
-        #     def show_differences(str1, str2):
-        #         print("Original Context:\n", repr(str1))
-        #         print("Corrected Context:\n", repr(str2))
-        #         if str1 != str2:
-        #             for i, (a, b) in enumerate(zip(str1, str2)):
-        #                 if a != b:
-        #                     print(f"Difference at index {i}: '{a}' != '{b}'")
+    #    Exhaustive DPR Search using PolyEncoder
+        with timer("bulk query by exhaustive search"): 
+            def show_differences(str1, str2):
+                print("Original Context:\n", repr(str1))
+                print("Corrected Context:\n", repr(str2))
+                if str1 != str2:
+                    for i, (a, b) in enumerate(zip(str1, str2)):
+                        if a != b:
+                            print(f"Difference at index {i}: '{a}' != '{b}'")
 
-        #     # PolyEncoder-based retrieval for multiple queries
-        #     df = retriever.retrieve(full_ds, topk=5, query_batch_size=2)
+            # PolyEncoder-based retrieval for multiple queries
+            df = retriever.retrieve(full_ds, topk=40, query_batch_size=4) 
+            print(df)
             
-        #     # 데이터프레임의 열 목록을 출력
-        #     print("df columns: ", df.columns) 
+            # 데이터프레임의 열 목록을 출력
+            print("df columns: ", df.columns) 
 
-        #     if df is not None and "original_context" in df.columns and "first_context" in df.columns:
-        #         df["correct"] = df["original_context"] == df["first_context"]
-        #         print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
-        #     else:
-        #         print("Error: DataFrame doesn't contain required columns")
+            if df is not None and "original_context" in df.columns and "first_context" in df.columns:
+                df["correct"] = df["original_context"] == df["first_context"]
+                print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
+            else:
+                print("Error: DataFrame doesn't contain required columns")
 
 # BM25 관련 코드
 # if __name__ == "__main__":
@@ -868,27 +869,27 @@ if __name__ == "__main__":
         
 #             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
-#     else:
-#         with timer("bulk query by exhaustive search"): 
-#             def show_differences(str1, str2):
-#                 # 각 문자열을 줄 단위로 나눠서 보여줌
-#                 print("Original Context:\n", repr(str1))
-#                 print("Corrected Context:\n", repr(str2))
+    # else:
+    #     with timer("bulk query by exhaustive search"): 
+    #         def show_differences(str1, str2):
+    #             # 각 문자열을 줄 단위로 나눠서 보여줌
+    #             print("Original Context:\n", repr(str1))
+    #             print("Corrected Context:\n", repr(str2))
 
-#                 # 문자열이 동일하지 않을 경우 차이점을 출력
-#                 if str1 != str2:
-#                     for i, (a, b) in enumerate(zip(str1, str2)):
-#                         if a != b:
-#                             print(f"Difference at index {i}: '{a}' != '{b}'")
+    #             # 문자열이 동일하지 않을 경우 차이점을 출력
+    #             if str1 != str2:
+    #                 for i, (a, b) in enumerate(zip(str1, str2)):
+    #                     if a != b:
+    #                         print(f"Difference at index {i}: '{a}' != '{b}'")
 
             
-#             df = retriever.retrieve(full_ds)
-#             df["correct"] = df["original_context"] == df["first_context"]
-#             # 데이터프레임의 각 행을 비교하고 차이점을 출력
-#             print(
-#                 "correct retrieval result by exhaustive search",
-#                 df["correct"].sum() / len(df),
-#             )
+    #         df = retriever.retrieve(full_ds)
+    #         df["correct"] = df["original_context"] == df["first_context"]
+    #         # 데이터프레임의 각 행을 비교하고 차이점을 출력
+    #         print(
+    #             "correct retrieval result by exhaustive search",
+    #             df["correct"].sum() / len(df),
+    #         )
 
-#         with timer("single query by exhaustive search"):
-#             scores, indices = retriever.retrieve(query) 
+    #     with timer("single query by exhaustive search"):
+    #         scores, indices = retriever.retrieve(query) 
