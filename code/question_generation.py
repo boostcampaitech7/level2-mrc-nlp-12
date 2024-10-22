@@ -2,7 +2,7 @@ from transformers import T5ForConditionalGeneration, T5Tokenizer
 from datasets import Dataset
 import torch
 
-model_name = 'KETI-AIR/ke-t5-base'
+model_name = 'KETI-AIR/ke-t5-large'
 
 # Set device to GPU if available
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -10,26 +10,35 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = T5ForConditionalGeneration.from_pretrained(model_name).to(device) # Move model to GPU
 tokenizer = T5Tokenizer.from_pretrained(model_name)
 
-def generate_question(context, answer):
-    # Format the input to the model
-    input_text = f"generate question: context: {context} answer: {answer}"
+def generate_questions(batch):
+    # Prepare inputs for the entire batch
+    input_texts = []
+
+    for context, answer_dict in zip(batch['context'], batch['answers']):
+        answer = answer_dict['text']
+        input_texts.append(f"generate question: context: {context} answer: {answer}")
     
-    # Tokenize the input
-    inputs = tokenizer.encode(input_text, return_tensors='pt', truncation=True, max_length=512).to(device)
+    # Tokenize the inputs
+    inputs = tokenizer(input_texts, return_tensors='pt', padding=True, truncation=True, max_length=512)
+    
+    # Move inputs to the device
+    inputs = {key: val.to(device) for key, val in inputs.items()}
 
-    # Generate question using the model
-    outputs = model.generate(inputs, max_length=64, num_beams=4, early_stopping=True)
+    # Generate questions for the entire batch
+    outputs = model.generate(inputs['input_ids'], max_length=64, num_beams=4, early_stopping=True)
 
-    # Decode the generated question
-    question = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return question
+    # Decode the generated questions
+    questions = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+    
+    return {'question': questions}
 
 
 train_data = Dataset.load_from_disk('../data/train_dataset/train')
     
 train_data = train_data.map(
-    lambda row, idx: {'question': generate_question(row['context'], row['answers']['text'])},
-    with_indices=True
+    generate_questions,
+    batched=True,
+    batch_size=16
 )
 
 train_data.save_to_disk('../data/augment_t5_train_dataset')
