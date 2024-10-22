@@ -13,6 +13,7 @@ from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
+    RobertaTokenizerFast,
     DataCollatorWithPadding,
     EvalPrediction,
     HfArgumentParser,
@@ -48,7 +49,7 @@ def main():
     print(model_args.model_name_or_path)
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
-    # training_args.per_device_train_batch_size = 4
+    training_args.per_device_train_batch_size = 4
     # print(training_args.per_device_train_batch_size)
 
     print(f"model is from {model_args.model_name_or_path}")
@@ -77,7 +78,7 @@ def main():
         if model_args.config_name is not None
         else model_args.model_name_or_path,
     )
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = RobertaTokenizerFast.from_pretrained(
         model_args.tokenizer_name
         if model_args.tokenizer_name is not None
         else model_args.model_name_or_path,
@@ -113,6 +114,9 @@ def run_mrc(
     tokenizer,
     model,
 ) -> NoReturn:
+    
+    training_args.save_steps=10000
+    training_args.save_total_limit=1
 
     # dataset을 전처리합니다.
     # training과 evaluation에서 사용되는 전처리는 아주 조금 다른 형태를 가집니다.
