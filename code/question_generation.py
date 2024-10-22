@@ -1,9 +1,13 @@
 from transformers import T5ForConditionalGeneration, T5Tokenizer
 from datasets import Dataset
+import torch
 
 model_name = 'KETI-AIR/ke-t5-base'
 
-model = T5ForConditionalGeneration.from_pretrained(model_name)
+# Set device to GPU if available
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+model = T5ForConditionalGeneration.from_pretrained(model_name).to(device) # Move model to GPU
 tokenizer = T5Tokenizer.from_pretrained(model_name)
 
 def generate_question(context, answer):
@@ -11,7 +15,7 @@ def generate_question(context, answer):
     input_text = f"generate question: context: {context} answer: {answer}"
     
     # Tokenize the input
-    inputs = tokenizer.encode(input_text, return_tensors='pt', truncation=True, max_length=512)
+    inputs = tokenizer.encode(input_text, return_tensors='pt', truncation=True, max_length=512).to(device)
 
     # Generate question using the model
     outputs = model.generate(inputs, max_length=64, num_beams=4, early_stopping=True)
