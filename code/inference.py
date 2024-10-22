@@ -34,7 +34,8 @@ from transformers import (
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
-from kiwipiepy import Kiwi
+from kiwipiepy import Kiwi 
+from nori_tokenizer.nori import create_nori
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,19 @@ def main():
         except Exception as e:
             # 예상치 못한 다른 에러 발생 시 처리
             print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return [] 
+        
+    def nori_tokenize(text): 
+        try: 
+            return create_nori(text)
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
             return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return [] 
 
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
@@ -132,7 +145,7 @@ def main():
     # True일 경우 : run passage retrieval
     if data_args.eval_retrieval: 
         datasets = run_retrieval(
-            kiwipiepy_tokenize, datasets, training_args, data_args,
+            nori_tokenize, datasets, training_args, data_args,
         ) 
         
     # if training_args.do_train_poly:
