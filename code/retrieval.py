@@ -6,22 +6,20 @@ import random
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
-from torch.utils.data import DataLoader 
-from torch.nn.utils.rnn import pad_sequence  
-
-
-from contextlib import contextmanager
-from typing import List, NoReturn, Optional, Tuple, Union 
+import kiwipiepy.transformers_addon
 import re
 import argparse
 import faiss
 import numpy as np
 import pandas as pd
-from datasets import Dataset, concatenate_datasets, load_from_disk
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel, AdamW, get_linear_schedule_with_warmup
-from tqdm.auto import tqdm 
 
-# 추가한 코드
+from torch.utils.data import DataLoader 
+from torch.nn.utils.rnn import pad_sequence  
+from contextlib import contextmanager
+from typing import List, NoReturn, Optional, Tuple, Union 
+from datasets import Dataset, concatenate_datasets, load_from_disk
+from transformers import AutoTokenizer, AutoModel, AdamW, get_linear_schedule_with_warmup
+from tqdm.auto import tqdm 
 from rank_bm25 import BM25Okapi 
 from kiwipiepy import Kiwi
 
@@ -44,6 +42,7 @@ class SparseRetrieval:
     def __init__(
         self,
         tokenize_fn,
+        q_tokenize_fn,
         data_path: Optional[str] = "../data/",
         context_path: Optional[str] = "wikipedia_documents.json",
         index_file: Optional[str] = "bm25_index.pkl"
@@ -69,7 +68,8 @@ class SparseRetrieval:
         Summary:
             Passage 파일을 불러오고 TfidfVectorizer를 선언하는 기능을 합니다.
         """
-        self.tokenize_fn = tokenize_fn
+        self.tokenize_fn = tokenize_fn 
+        self.q_tokenize_fn = q_tokenize_fn
         self.data_path = data_path
         self.index_file = index_file 
 
@@ -87,7 +87,7 @@ class SparseRetrieval:
         else:
             print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
             self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)] 
-            self.BM25 = BM25Okapi(self.tokenized_contexts, k1=0.5, b=0.75)
+            self.BM25 = BM25Okapi(self.tokenized_contexts, k1=1.2, b=0.75)
             with open(self.index_file, "wb") as f:
                 pickle.dump(self.BM25, f)
             print("BM25 index saved to pickle.")
@@ -130,7 +130,7 @@ class SparseRetrieval:
             print("Faiss Indexer Saved.")
 
     def retrieve(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 25
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
     ) -> Union[Tuple[List[float], List[int]], pd.DataFrame]:
         """
         Arguments:
@@ -144,7 +144,7 @@ class SparseRetrieval:
 
         if isinstance(query_or_dataset, str):
             # 단일 쿼리 처리
-            tokenized_query = self.tokenize_fn(query_or_dataset)
+            tokenized_query = self.q_tokenize_fn(query_or_dataset)
             doc_scores = self.BM25.get_scores(tokenized_query)
             topk_indices = np.argsort(doc_scores)[::-1][:topk]
             print("[Search query]\n", query_or_dataset, "\n")
@@ -163,7 +163,7 @@ class SparseRetrieval:
             # 이거 나중에 에러 없는 경우에는 queries[:50] -> queries로 변경하기
             for idx, example in enumerate(tqdm(query_or_dataset, desc="BM25 retrieval")):
                 query = example["question"]
-                tokenized_query = self.tokenize_fn(query)
+                tokenized_query = self.q_tokenize_fn(query)
                 doc_scores = self.BM25.get_scores(tokenized_query)
                 topk_indices = np.argsort(doc_scores)[::-1][:topk]
 
@@ -710,186 +710,187 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
         self.cached_context_embeddings = torch.load("cached_context_embeddings.pt").to(self.device)
 
 # Dense 관련 코드
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
-    parser.add_argument(
-        "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
-    )
-    parser.add_argument(
-        "--model_name_or_path",
-        metavar="klue/bert-base",
-        type=str,
-        help="Model name or path for PolyEncoder", 
-        default="klue/bert-base",
-    )
-    parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
-    parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
-    )
-    parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
-
-    args = parser.parse_args()
-
-    # Test dataset load
-    org_dataset = load_from_disk(args.dataset_name)
-    full_ds = concatenate_datasets(
-        [
-            org_dataset["train"].flatten_indices(),
-            org_dataset["validation"].flatten_indices(),
-        ]
-    )
-    print("*" * 40, "query dataset", "*" * 40)
-    torch.cuda.empty_cache()
-    # Initialize PolyEncoder-based Dense Retrieval
-    retriever = DenseRetrievalPolyEncoder(
-        model_name_or_path=args.model_name_or_path,
-        data_path=args.data_path,
-        context_path=args.context_path, 
-        poly_m=64,  # You can adjust this value based on your needs
-        device="cuda" if torch.cuda.is_available() else "cpu"
-    )
-
-    query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
-
-    if args.use_faiss:
-        # FAISS-based retrieval
-        with timer("single query by faiss"):
-            scores, indices = retriever.retrieve_faiss(query)
-
-        # Bulk query processing
-        with timer("single query by faiss"): 
-            scores, indices = retriever.retrieve_faiss(query)
-            print(f"Top results for query: {query}")
-    else:
-        # Single query evaluation
-        with timer("single query by exhaustive search"):
-            if os.path.exists("cached_context_embeddings.pt"):
-                print("캐시된 문맥 임베딩을 불러옵니다.")
-                retriever.load_cached_context_embeddings()
-            else:
-                print("문맥 임베딩을 계산하고 캐싱합니다.")
-                retriever.cache_context_embeddings()
-
-            result = retriever.retrieve(query) 
-            print(result)
-
-    #    Exhaustive DPR Search using PolyEncoder
-        with timer("bulk query by exhaustive search"): 
-            def show_differences(str1, str2):
-                print("Original Context:\n", repr(str1))
-                print("Corrected Context:\n", repr(str2))
-                if str1 != str2:
-                    for i, (a, b) in enumerate(zip(str1, str2)):
-                        if a != b:
-                            print(f"Difference at index {i}: '{a}' != '{b}'")
-
-            # PolyEncoder-based retrieval for multiple queries
-            df = retriever.retrieve(full_ds, topk=40, query_batch_size=4) 
-            print(df)
-            
-            # 데이터프레임의 열 목록을 출력
-            print("df columns: ", df.columns) 
-
-            if df is not None and "original_context" in df.columns and "first_context" in df.columns:
-                df["correct"] = df["original_context"] == df["first_context"]
-                print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
-            else:
-                print("Error: DataFrame doesn't contain required columns")
-
-# BM25 관련 코드
 # if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description="")
+#     parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
 #     parser.add_argument(
-#         "--dataset_name", metavar="./data/train_dataset", type=str, help="", default="../data/train_dataset"
+#         "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
 #     )
 #     parser.add_argument(
 #         "--model_name_or_path",
-#         metavar="klue/roberta-large",
+#         metavar="klue/bert-base",
 #         type=str,
-#         help="", 
-#         default="klue/roberta-large",
+#         help="Model name or path for PolyEncoder", 
+#         default="klue/bert-base",
 #     )
-#     parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
+#     parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
 #     parser.add_argument(
-#         "--context_path", metavar="wikipedia_documents", type=str, help="", default="wikipedia_documents.json"
+#         "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
 #     )
-#     parser.add_argument("--use_faiss", metavar=False, type=bool, help="", default=False)
+#     parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
 
 #     args = parser.parse_args()
 
-#     # Test sparse
+#     # Test dataset load
 #     org_dataset = load_from_disk(args.dataset_name)
 #     full_ds = concatenate_datasets(
 #         [
 #             org_dataset["train"].flatten_indices(),
 #             org_dataset["validation"].flatten_indices(),
 #         ]
-#     )  # train dev 를 합친 4192 개 질문에 대해 모두 테스트
+#     )
 #     print("*" * 40, "query dataset", "*" * 40)
-#     print(full_ds)
-
-#     # Kiwi 초기화 
-#     kiwi = Kiwi()
-
-#     # tokenize_fn 정의
-#     def kiwipiepy_tokenize(text):
-#         try:
-#             cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
-#             tokens = kiwi.tokenize(cleaned_text)
-#             return [token.form for token in tokens]
-#         except (UnicodeDecodeError, AttributeError) as e:
-#             print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
-#             # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
-#             return []
-#         except Exception as e:
-#             # 예상치 못한 다른 에러 발생 시 처리
-#             print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
-#             return []
-
-#     retriever = SparseRetrieval(
-#         tokenize_fn=kiwipiepy_tokenize,
+#     torch.cuda.empty_cache()
+#     # Initialize PolyEncoder-based Dense Retrieval
+#     retriever = DenseRetrievalPolyEncoder(
+#         model_name_or_path=args.model_name_or_path,
 #         data_path=args.data_path,
-#         context_path=args.context_path,
+#         context_path=args.context_path, 
+#         poly_m=64,  # You can adjust this value based on your needs
+#         device="cuda" if torch.cuda.is_available() else "cpu"
 #     )
 
 #     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
 
 #     if args.use_faiss:
-
-#         # test single query
+#         # FAISS-based retrieval
 #         with timer("single query by faiss"):
 #             scores, indices = retriever.retrieve_faiss(query)
 
-#         # test bulk
+#         # Bulk query processing
+#         with timer("single query by faiss"): 
+#             scores, indices = retriever.retrieve_faiss(query)
+#             print(f"Top results for query: {query}")
+#     else:
+#         # Single query evaluation
+#         with timer("single query by exhaustive search"):
+#             if os.path.exists("cached_context_embeddings.pt"):
+#                 print("캐시된 문맥 임베딩을 불러옵니다.")
+#                 retriever.load_cached_context_embeddings()
+#             else:
+#                 print("문맥 임베딩을 계산하고 캐싱합니다.")
+#                 retriever.cache_context_embeddings()
+
+#             result = retriever.retrieve(query) 
+#             print(result)
+
+#     #    Exhaustive DPR Search using PolyEncoder
 #         with timer("bulk query by exhaustive search"): 
-#             retriever.get_sparse_embedding()
-#             df = retriever.retrieve_faiss(full_ds)
-#             df["correct"] = df["original_context"] == df["context"]
+#             def show_differences(str1, str2):
+#                 print("Original Context:\n", repr(str1))
+#                 print("Corrected Context:\n", repr(str2))
+#                 if str1 != str2:
+#                     for i, (a, b) in enumerate(zip(str1, str2)):
+#                         if a != b:
+#                             print(f"Difference at index {i}: '{a}' != '{b}'")
+
+#             # PolyEncoder-based retrieval for multiple queries
+#             df = retriever.retrieve(full_ds, topk=40, query_batch_size=4) 
+#             print(df)
+            
+#             # 데이터프레임의 열 목록을 출력
+#             print("df columns: ", df.columns) 
+
+#             if df is not None and "original_context" in df.columns and "first_context" in df.columns:
+#                 df["correct"] = df["original_context"] == df["first_context"]
+#                 print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
+#             else:
+#                 print("Error: DataFrame doesn't contain required columns")
+
+# BM25 관련 코드
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument(
+        "--dataset_name", metavar="./data/train_dataset", type=str, help="", default="../data/train_dataset"
+    )
+    parser.add_argument(
+        "--model_name_or_path",
+        metavar="klue/roberta-large",
+        type=str,
+        help="", 
+        default="klue/roberta-large",
+    )
+    parser.add_argument("--data_path", metavar="./data", type=str, help="", default="../data")
+    parser.add_argument(
+        "--context_path", metavar="wikipedia_documents", type=str, help="", default="wikipedia_documents.json"
+    )
+    parser.add_argument("--use_faiss", metavar=False, type=bool, help="", default=False)
+
+    args = parser.parse_args()
+
+    # Test sparse
+    org_dataset = load_from_disk(args.dataset_name)
+    full_ds = concatenate_datasets(
+        [
+            org_dataset["train"].flatten_indices(),
+            org_dataset["validation"].flatten_indices(),
+        ]
+    )  # train dev 를 합친 4192 개 질문에 대해 모두 테스트
+    print("*" * 40, "query dataset", "*" * 40)
+    print(full_ds)
+
+    # Kiwi 초기화 
+    kiwi = Kiwi()
+
+    # tokenize_fn 정의
+    def kiwipiepy_tokenize(text):
+        try:
+            cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
+            tokens = kiwi.tokenize(cleaned_text)
+            return [token.form for token in tokens]
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+            return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return []
+
+    retriever = SparseRetrieval(
+        tokenize_fn=kiwipiepy_tokenize,
+        q_tokenize_fn=kiwipiepy_tokenize,
+        data_path=args.data_path,
+        context_path=args.context_path,
+    )
+
+    query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
+
+    if args.use_faiss:
+
+        # test single query
+        with timer("single query by faiss"):
+            scores, indices = retriever.retrieve_faiss(query)
+
+        # test bulk
+        with timer("bulk query by exhaustive search"): 
+            retriever.get_sparse_embedding()
+            df = retriever.retrieve_faiss(full_ds)
+            df["correct"] = df["original_context"] == df["context"]
 
         
-#             print("correct retrieval result by faiss", df["correct"].sum() / len(df))
+            print("correct retrieval result by faiss", df["correct"].sum() / len(df))
 
-    # else:
-    #     with timer("bulk query by exhaustive search"): 
-    #         def show_differences(str1, str2):
-    #             # 각 문자열을 줄 단위로 나눠서 보여줌
-    #             print("Original Context:\n", repr(str1))
-    #             print("Corrected Context:\n", repr(str2))
+    else:
+        with timer("bulk query by exhaustive search"): 
+            def show_differences(str1, str2):
+                # 각 문자열을 줄 단위로 나눠서 보여줌
+                print("Original Context:\n", repr(str1))
+                print("Corrected Context:\n", repr(str2))
 
-    #             # 문자열이 동일하지 않을 경우 차이점을 출력
-    #             if str1 != str2:
-    #                 for i, (a, b) in enumerate(zip(str1, str2)):
-    #                     if a != b:
-    #                         print(f"Difference at index {i}: '{a}' != '{b}'")
+                # 문자열이 동일하지 않을 경우 차이점을 출력
+                if str1 != str2:
+                    for i, (a, b) in enumerate(zip(str1, str2)):
+                        if a != b:
+                            print(f"Difference at index {i}: '{a}' != '{b}'")
 
             
-    #         df = retriever.retrieve(full_ds)
-    #         df["correct"] = df["original_context"] == df["first_context"]
-    #         # 데이터프레임의 각 행을 비교하고 차이점을 출력
-    #         print(
-    #             "correct retrieval result by exhaustive search",
-    #             df["correct"].sum() / len(df),
-    #         )
+            df = retriever.retrieve(full_ds)
+            df["correct"] = df["original_context"] == df["first_context"]
+            # 데이터프레임의 각 행을 비교하고 차이점을 출력
+            print(
+                "correct retrieval result by exhaustive search",
+                df["correct"].sum() / len(df),
+            )
 
-    #     with timer("single query by exhaustive search"):
-    #         scores, indices = retriever.retrieve(query) 
+        with timer("single query by exhaustive search"):
+            scores, indices = retriever.retrieve(query) 

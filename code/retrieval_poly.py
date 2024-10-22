@@ -138,7 +138,7 @@ if __name__ == "__main__":
         "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
   )
   parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
-  parser.add_argument("--embed_size", metavar=768, type=bool, help="Use FAISS for retrieval", default=768)
+  parser.add_argument("--embed_size", metavar=768, type=bool, help="Use FAISS for retrieval", default=1024)
 
   args = parser.parse_args()
 

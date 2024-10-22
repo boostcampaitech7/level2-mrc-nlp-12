@@ -9,6 +9,7 @@ import logging
 import sys
 import torch
 import numpy as np
+import urllib3
 
 from typing import Callable, Dict, List, NoReturn, Tuple
 from arguments import DataTrainingArguments, ModelArguments
@@ -36,6 +37,9 @@ from transformers import (
 from utils_qa import check_no_error, postprocess_qa_predictions
 from kiwipiepy import Kiwi 
 from nori_tokenizer.nori import create_nori
+from nori_tokenizer.elasticsearch_bm25 import create_es_connection, create_index, get_index_settings
+from itertools import tee
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,7 @@ logger = logging.getLogger(__name__)
 def main():
     # 가능한 arguments 들은 ./arguments.py 나 transformer package 안의 src/transformers/training_args.py 에서 확인 가능합니다.
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     parser = HfArgumentParser(
         (ModelArguments, DataTrainingArguments, TrainingArguments)
@@ -95,17 +100,26 @@ def main():
         "가", "을", "를", "에", "에게", "에서", "로", "부터", "까지", "와", "과", "도", "은", 
         "는", "이것", "그것", "저것", "뭐", "왜", "어떻게", "어디", "누구", "있다", "없다"
     }
-
+    
     # tokenize_fn 정의
-    def kiwipiepy_tokenize(text):
+    def kiwipiepy_tokenize(text):        
         try:
             cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
             tokens = kiwi.tokenize(cleaned_text)
             # 불용어 제거와 특정 품사 필터링 (예: 명사, 형용사만 사용)
-            token_forms = [
+            unigrams = [
                 token.form for token in tokens 
                 if token.form not in stopwords 
-                and token.tag in {'NNG', 'NNP', 'VA'}]
+                and token.tag in {'NNG', 'NNP', 'VA'}
+            ]
+            # 명사만 선택
+            nouns = [token[0] for token in tokens if token[1] == 'NNG' or token[1] == 'NNP']
+            
+            # 명사 + 명사 bigram 생성
+            bigrams = [' '.join((nouns[i], nouns[i+1])) for i in range(len(nouns)-1)]            
+            
+            token_forms = unigrams + bigrams
+            
             return token_forms
         except (UnicodeDecodeError, AttributeError) as e:
             print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
@@ -118,7 +132,7 @@ def main():
         
     def nori_tokenize(text): 
         try: 
-            return create_nori(text)
+            return create_nori(text, es, INDEX)
         except (UnicodeDecodeError, AttributeError) as e:
             print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
             # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
@@ -143,10 +157,19 @@ def main():
     # )
 
     # True일 경우 : run passage retrieval
+    # Elasticsearch 연결
+    # 인덱스 생성
+    # settings = get_index_settings()
+    # INDEX = "bm25_tokenizer"
+    
+    # es = create_es_connection(INDEX)
+    
+    # create_index(es, INDEX, settings)
+
     if data_args.eval_retrieval: 
         datasets = run_retrieval(
-            nori_tokenize, datasets, training_args, data_args,
-        ) 
+            kiwipiepy_tokenize, kiwipiepy_tokenize, datasets, training_args, data_args,
+        )
         
     # if training_args.do_train_poly:
         # train_polyencoder_with_bm25(poly_encoder) 
@@ -157,6 +180,7 @@ def main():
 
 def run_retrieval(
     tokenize_fn: Callable[[str], List[str]],
+    q_tokenize_fn: Callable[[str], List[str]],
     datasets: DatasetDict,
     training_args: TrainingArguments,
     data_args: DataTrainingArguments,
@@ -166,7 +190,7 @@ def run_retrieval(
 
     # Query에 맞는 Passage들을 Retrieval 합니다.
     retriever = SparseRetrieval(
-        tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
+        tokenize_fn=tokenize_fn, q_tokenize_fn=q_tokenize_fn, data_path=data_path, context_path=context_path
     )
 
     # if data_args.use_faiss:
@@ -296,6 +320,7 @@ def run_mrc(
         features,
         predictions: Tuple[np.ndarray, np.ndarray],
         training_args: TrainingArguments,
+        top_k: int = 5  # top-k passages를 사용할 수 있도록 설정
     ) -> EvalPrediction:
         # Post-processing: start logits과 end logits을 original context의 정답과 match시킵니다.
         predictions = postprocess_qa_predictions(
@@ -303,7 +328,6 @@ def run_mrc(
             features=features,
             predictions=predictions,
             max_answer_length=data_args.max_answer_length,
-            output_dir=training_args.output_dir,
         )
         # Metric을 구할 수 있도록 Format을 맞춰줍니다.
         formatted_predictions = [

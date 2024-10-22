@@ -13,7 +13,6 @@ from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
-    RobertaTokenizerFast,
     DataCollatorWithPadding,
     EvalPrediction,
     HfArgumentParser,
@@ -49,7 +48,7 @@ def main():
     print(model_args.model_name_or_path)
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
-    training_args.per_device_train_batch_size = 4
+    training_args.per_device_train_batch_size = 16
     # print(training_args.per_device_train_batch_size)
 
     print(f"model is from {model_args.model_name_or_path}")
@@ -78,7 +77,7 @@ def main():
         if model_args.config_name is not None
         else model_args.model_name_or_path,
     )
-    tokenizer = RobertaTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name
         if model_args.tokenizer_name is not None
         else model_args.model_name_or_path,
