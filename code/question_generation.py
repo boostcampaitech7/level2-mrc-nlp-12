@@ -2,6 +2,7 @@ from transformers import T5ForConditionalGeneration, T5Tokenizer
 from datasets import Dataset
 import torch
 
+#lcw99/t5-base-korean-paraphrase
 model_name = 'KETI-AIR/ke-t5-large'
 
 # Set device to GPU if available
@@ -12,11 +13,12 @@ tokenizer = T5Tokenizer.from_pretrained(model_name)
 
 def generate_questions(batch):
     # Prepare inputs for the entire batch
-    input_texts = []
+    input_texts = [f"paraphrase: {question}" for question in batch['question']]
 
-    for context, answer_dict in zip(batch['context'], batch['answers']):
-        answer = answer_dict['text']
-        input_texts.append(f"generate question: context: {context} answer: {answer}")
+    # for context, answer_dict in zip(batch['context'], batch['answers']):
+    #     answer = answer_dict['text']
+    #     input_texts.append(f"generate question: context: {context} answer: {answer}")
+
     
     # Tokenize the inputs
     inputs = tokenizer(input_texts, return_tensors='pt', padding=True, truncation=True, max_length=512)
@@ -38,7 +40,7 @@ train_data = Dataset.load_from_disk('../data/train_dataset/train')
 train_data = train_data.map(
     generate_questions,
     batched=True,
-    batch_size=16
+    batch_size=8
 )
 
-train_data.save_to_disk('../data/augment_t5_train_dataset')
+train_data.save_to_disk('../data/paraphrase_t5_train_dataset')
