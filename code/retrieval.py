@@ -45,16 +45,16 @@ class SparseRetrieval:
                 데이터가 보관되어 있는 경로입니다.
 
             context_path:
-                Passage들이 묶여있는 파일명입니다.
+                Passage들이 묶여있는 파일을 포함하는 경로명입니다.
 
-            data_path/context_path가 존재해야합니다.
+            context_path가 존재해야합니다.
 
         Summary:
             Passage 파일을 불러오고 TfidfVectorizer를 선언하는 기능을 합니다.
         """
 
         self.data_path = data_path
-        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+        with open(os.path.join(context_path), "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
         self.contexts = list(
