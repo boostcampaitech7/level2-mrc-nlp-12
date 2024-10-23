@@ -6,7 +6,10 @@ __pycache__/
 experiments/
 assets/
 models/
+models_reader/
 outputs/
 wandb/
 .vscode/
 install/
+ensemble_outputs/
+predictions_for_ensemble/
