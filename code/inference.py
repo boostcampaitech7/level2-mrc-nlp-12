@@ -9,6 +9,8 @@ import sys
 from typing import Callable, Dict, List, NoReturn, Tuple
 
 import numpy as np
+import torch
+import urllib3
 from arguments import DataTrainingArguments, ModelArguments
 from datasets import (
     Dataset,
@@ -19,7 +21,8 @@ from datasets import (
     load_from_disk,
     load_metric,
 )
-from retrieval import SparseRetrieval
+from kiwipiepy import Kiwi
+from retrieval import DenseRetrievalPolyEncoder, SparseRetrieval
 from trainer_qa import QuestionAnsweringTrainer
 from transformers import (
     AutoConfig,
@@ -33,19 +36,24 @@ from transformers import (
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
 
+# from nori_tokenizer.nori import create_nori
+# from nori_tokenizer.elasticsearch_bm25 import create_es_connection, create_index, get_index_settings
+
 logger = logging.getLogger(__name__)
 
 
 def main():
     # 가능한 arguments 들은 ./arguments.py 나 transformer package 안의 src/transformers/training_args.py 에서 확인 가능합니다.
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     parser = HfArgumentParser(
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
     training_args.do_train = True
+
+    args = parser.parse_args()
 
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
@@ -83,27 +91,124 @@ def main():
         ),
         use_fast=True,
     )
+
+    # Kiwi 초기화
+    kiwi = Kiwi()
+
+    # 불용어 목록 설정
+    stopwords = {
+        "이",
+        "그",
+        "저",
+        "것",
+        "수",
+        "그리고",
+        "그러나",
+        "또한",
+        "하지만",
+        "즉",
+        "또",
+        "의",
+        "가",
+        "을",
+        "를",
+        "에",
+        "에게",
+        "에서",
+        "로",
+        "부터",
+        "까지",
+        "와",
+        "과",
+        "도",
+        "은",
+        "는",
+        "이것",
+        "그것",
+        "저것",
+        "뭐",
+        "왜",
+        "어떻게",
+        "어디",
+        "누구",
+        "있다",
+        "없다",
+    }
+
+    # tokenize_fn 정의
+    def kiwipiepy_tokenize(text):
+        try:
+            cleaned_text = text.encode("utf-8", "ignore").decode("utf-8")
+            tokens = kiwi.tokenize(cleaned_text)
+            # 불용어 제거와 특정 품사 필터링 (예: 명사, 형용사만 사용)
+            token_forms = [
+                token.form
+                for token in tokens
+                if token.form not in stopwords and token.tag in {"NNG", "NNP", "VA"}
+            ]
+            return token_forms
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+            return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return []
+
+    # def nori_tokenize(text):
+    #     try:
+    #         return create_nori(text, es, INDEX)
+    #     except (UnicodeDecodeError, AttributeError) as e:
+    #         print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+    #         # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+    #         return []
+    #     except Exception as e:
+    #         # 예상치 못한 다른 에러 발생 시 처리
+    #         print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+    #         return []
+
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
     )
 
+    # poly_encoder = DenseRetrievalPolyEncoder(
+    #     model_name_or_path=args.model_name_or_path,
+    #     data_path=args.data_path,
+    #     context_path=args.context_path,
+    #     poly_m=64,  # You can adjust this value based on your needs
+    #     device="cuda" if torch.cuda.is_available() else "cpu"
+    # )
+
     # True일 경우 : run passage retrieval
+    # Elasticsearch 연결
+    # 인덱스 생성
+    # settings = get_index_settings()
+    INDEX = "bm25_tokenizer"
+
+    # es = create_es_connection(INDEX)
+
+    # create_index(es, INDEX, settings)
+
     if data_args.eval_retrieval:
-        datasets = run_sparse_retrieval(
-            tokenizer.tokenize,
+        datasets = run_retrieval(
+            kiwipiepy_tokenize,
             datasets,
             training_args,
             data_args,
         )
+
+    # if training_args.do_train_poly:
+    # train_polyencoder_with_bm25(poly_encoder)
 
     # eval or predict mrc model
     if training_args.do_eval or training_args.do_predict:
         run_mrc(data_args, training_args, model_args, datasets, tokenizer, model)
 
 
-def run_sparse_retrieval(
+def run_retrieval(
     tokenize_fn: Callable[[str], List[str]],
     datasets: DatasetDict,
     training_args: TrainingArguments,
@@ -116,15 +221,15 @@ def run_sparse_retrieval(
     retriever = SparseRetrieval(
         tokenize_fn=tokenize_fn, data_path=data_path, context_path=context_path
     )
-    retriever.get_sparse_embedding()
 
-    if data_args.use_faiss:
-        retriever.build_faiss(num_clusters=data_args.num_clusters)
-        df = retriever.retrieve_faiss(
-            datasets["validation"], topk=data_args.top_k_retrieval
-        )
-    else:
-        df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
+    # if data_args.use_faiss:
+    #     retriever.build_faiss(num_clusters=data_args.num_clusters)
+    #     df = retriever.retrieve_faiss(
+    #         datasets["validation"], topk=data_args.top_k_retrieval
+    #     )
+    # else:
+
+    df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
 
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
@@ -310,6 +415,37 @@ def run_mrc(
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
 
+
+def custom_loss_function(pos_scores, neg_scores, margin=1.0):
+    # Positive similarity를 최대화하고, Negative similarity를 최소화하도록 손실 계산
+    positive_loss = 1 - pos_scores
+    negative_loss = torch.clamp(neg_scores - margin, min=0.0)
+
+    # 두 손실의 평균을 구함
+    loss = positive_loss.mean() + negative_loss.mean()
+    return loss
+
+
+# def train_polyencoder_with_bm25(poly_encoder):
+#     poly_encoder.train()
+
+#     for batch in dataloader:
+#         optimizer.zero_grad()
+#         queries, positives, negatives = batch["query"], batch["positive"], batch["negative"]
+
+#         # Step 1: BM25 기반의 긍정 및 부정 문서 선택
+#         pos_embeddings = poly_encoder.encode_docs(positives)
+#         neg_embeddings = poly_encoder.encode_docs(negatives)
+#         query_embeddings = poly_encoder.encode_query(queries)
+
+#         # Step 2: Similarity 계산
+#         pos_scores = (query_embeddings * pos_embeddings).sum(dim=-1)
+#         neg_scores = (query_embeddings.unsqueeze(1) * neg_embeddings).sum(dim=-1)
+
+#         # Step 3: Loss 계산 및 학습 진행
+#         loss = custom_loss_function(pos_scores, neg_scores)  # 사용자 정의 손실 함수 사용
+#         loss.backward()
+#         optimizer.step()
 
 if __name__ == "__main__":
     main()
