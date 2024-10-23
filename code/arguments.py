@@ -28,7 +28,7 @@ class ModelArguments:
     )
     data_path: Optional[str] = field(
         default="../data",
-        metadata={"help": "A path where datas are stored at"},
+        metadata={"help": "A path where .bin files are located/stored at"},
     )
     context_path: Optional[str] = field(
         default="wikipedia_documents.json",

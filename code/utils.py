@@ -81,6 +81,7 @@ def get_inference_arguments(experiment_dir):
 
     # Ensure output_dir is set to experiment_dir
     json_args["output_dir"] = experiment_dir
+    json_args["data_path"] = json_args["model_name_or_path"]
 
     # Parse command-line arguments
     parser.set_defaults(**json_args)

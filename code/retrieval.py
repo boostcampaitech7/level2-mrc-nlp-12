@@ -54,7 +54,7 @@ class SparseRetrieval:
         """
 
         self.data_path = data_path
-        with open(os.path.join(context_path), "r", encoding="utf-8") as f:
+        with open(context_path, "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
         self.contexts = list(
@@ -83,7 +83,7 @@ class SparseRetrieval:
 
         # Pickle을 저장합니다.
         pickle_name = f"sparse_embedding.bin"
-        tfidfv_name = f"tfidv.bin"
+        tfidfv_name = f"tfidf.bin"
         emd_path = os.path.join(self.data_path, pickle_name)
         tfidfv_path = os.path.join(self.data_path, tfidfv_name)
 
