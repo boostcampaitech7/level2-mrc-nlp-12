@@ -31,6 +31,12 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from utils import (
+    check_git_status,
+    create_experiment_dir,
+    get_inference_arguments,
+    save_args,
+)
 from utils_qa import check_no_error, postprocess_qa_predictions
 
 logger = logging.getLogger(__name__)
@@ -40,12 +46,12 @@ def main():
     # 가능한 arguments 들은 ./arguments.py 나 transformer package 안의 src/transformers/training_args.py 에서 확인 가능합니다.
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
 
-    parser = HfArgumentParser(
-        (ModelArguments, DataTrainingArguments, TrainingArguments)
-    )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    commit_id = check_git_status()
+    experiment_dir = create_experiment_dir(commit_id=commit_id)
 
-    training_args.do_train = True
+    model_args, data_args, training_args, json_args = get_inference_arguments(
+        experiment_dir
+    )
 
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
@@ -101,6 +107,9 @@ def main():
     # eval or predict mrc model
     if training_args.do_eval or training_args.do_predict:
         run_mrc(data_args, training_args, model_args, datasets, tokenizer, model)
+
+    # Save the final arguments
+    save_args(json_args, experiment_dir, commit_id)
 
 
 def run_sparse_retrieval(

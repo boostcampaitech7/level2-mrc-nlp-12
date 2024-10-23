@@ -68,6 +68,32 @@ def get_arguments(experiment_dir):
     return model_args, data_args, training_args, json_args
 
 
+def get_inference_arguments(experiment_dir):
+    # Initialize the parser
+    parser = HfArgumentParser(
+        (ModelArguments, DataTrainingArguments, TrainingArguments)
+    )
+
+    # Load arguments from config.json
+    args_json_path = "../config_inference.json"
+    if os.path.exists(args_json_path):
+        json_args = load_args_from_json(args_json_path)
+    else:
+        json_args = {}
+
+    # Ensure output_dir is set to experiment_dir
+    json_args["output_dir"] = experiment_dir
+
+    # Parse command-line arguments
+    parser.set_defaults(**json_args)
+    combined_args = get_combined_args(json_args)
+    model_args, data_args, training_args = parser.parse_args_into_dataclasses(
+        args=combined_args
+    )
+
+    return model_args, data_args, training_args, json_args
+
+
 def get_combined_args(json_args):
     json_args_list = []
     for key, value in json_args.items():
