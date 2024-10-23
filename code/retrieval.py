@@ -21,7 +21,8 @@ from datasets import Dataset, concatenate_datasets, load_from_disk
 from transformers import AutoTokenizer, AutoModel, AdamW, get_linear_schedule_with_warmup
 from tqdm.auto import tqdm 
 from rank_bm25 import BM25Okapi 
-from kiwipiepy import Kiwi
+from kiwipiepy import Kiwi 
+from konlpy.tag import Okt
 
 
 

@@ -35,7 +35,8 @@ from transformers import (
     set_seed,
 )
 from utils_qa import check_no_error, postprocess_qa_predictions
-from kiwipiepy import Kiwi 
+from kiwipiepy import Kiwi
+from konlpy.tag import Okt
 from nori_tokenizer.nori import create_nori
 from nori_tokenizer.elasticsearch_bm25 import create_es_connection, create_index, get_index_settings
 from itertools import tee
@@ -75,7 +76,6 @@ def main():
     set_seed(training_args.seed)
 
     datasets = load_from_disk(data_args.dataset_name)
-    print(datasets)
 
     # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
     # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
@@ -93,6 +93,7 @@ def main():
 
     # Kiwi 초기화 
     kiwi = Kiwi()
+    okt = Okt()
     
     # 불용어 목록 설정
     stopwords = {
@@ -128,7 +129,34 @@ def main():
         except Exception as e:
             # 예상치 못한 다른 에러 발생 시 처리
             print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
-            return [] 
+            return []
+        
+    def okt_tokenize(text):        
+        try:
+            cleaned_text = text.encode('utf-8', 'ignore').decode('utf-8')
+            tokens = okt.pos(cleaned_text)
+            
+            # 불용어 제거와 특정 품사 필터링 (예: 명사, 형용사만 사용)
+            meaningful_token_forms = [
+                token[0] for token in tokens 
+                if token[0] not in stopwords 
+                and token[1] in  {'Noun', 'Adjective', 'Verb', 'Adverb', 'ProperNoun', 'Determiner'}
+            ]
+            
+            token_forms = [
+                token[0] for token in tokens
+            ]
+            
+            return meaningful_token_forms + token_forms
+        except (UnicodeDecodeError, AttributeError) as e:
+            print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+            # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+            return []
+        except Exception as e:
+            # 예상치 못한 다른 에러 발생 시 처리
+            print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+            return []
+
         
     def nori_tokenize(text): 
         try: 
@@ -147,6 +175,9 @@ def main():
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
     )
+    
+    model.resize_token_embeddings(len(tokenizer))
+
     
     # poly_encoder = DenseRetrievalPolyEncoder(
     #     model_name_or_path=args.model_name_or_path,
@@ -168,7 +199,7 @@ def main():
 
     if data_args.eval_retrieval: 
         datasets = run_retrieval(
-            kiwipiepy_tokenize, kiwipiepy_tokenize, datasets, training_args, data_args,
+            okt_tokenize, okt_tokenize, datasets, training_args, data_args,
         )
         
     # if training_args.do_train_poly:
@@ -240,6 +271,8 @@ def run_mrc(
     tokenizer,
     model,
 ) -> NoReturn:
+        
+    model.resize_token_embeddings(len(tokenizer))
 
     # eval 혹은 prediction에서만 사용함
     column_names = datasets["validation"].column_names
@@ -250,7 +283,7 @@ def run_mrc(
 
     # Padding에 대한 옵션을 설정합니다.
     # (question|context) 혹은 (context|question)로 세팅 가능합니다.
-    pad_on_right = tokenizer.padding_side == "right"
+    pad_on_right = tokenizer.padding_side == "right" 
 
     # 오류가 있는지 확인합니다.
     last_checkpoint, max_seq_length = check_no_error(
@@ -269,7 +302,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
