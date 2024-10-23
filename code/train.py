@@ -68,9 +68,9 @@ def main():
     os.environ["WANDB_PROJECT"] = (
         "MRC"  # set the wandb project where this run will be logged
     )
-    os.environ["WANDB_LOG_MODEL"] = (
-        "true"  # save your trained model checkpoint to wandb
-    )
+    # os.environ["WANDB_LOG_MODEL"] = (
+    #     "true"  # save your trained model checkpoint to wandb
+    # )
     os.environ["WANDB_WATCH"] = "false"  # turn off watch to log faster
     training_args.logging_steps = 100  # 로그 기록 주기
     training_args.eval_steps = training_args.logging_steps
