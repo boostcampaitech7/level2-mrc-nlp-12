@@ -68,9 +68,7 @@ def main():
     os.environ["WANDB_PROJECT"] = (
         "MRC"  # set the wandb project where this run will be logged
     )
-    # os.environ["WANDB_LOG_MODEL"] = (
-    #     "true"  # save your trained model checkpoint to wandb
-    # )
+    os.environ["WANDB_LOG_MODEL"] = "checkpoint"  # save your trained model checkpoint to wandb
     os.environ["WANDB_WATCH"] = "false"  # turn off watch to log faster
     training_args.logging_steps = 100  # 로그 기록 주기
     training_args.eval_steps = training_args.logging_steps
@@ -175,7 +173,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
@@ -267,7 +265,7 @@ def run_mrc(
             stride=data_args.doc_stride,
             return_overflowing_tokens=True,
             return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
+            return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
