@@ -8,6 +8,9 @@ scikit-learn
 # faiss install (if you want to)
 faiss-gpu
 
-# 내가 추가한 라이브러리 
 bm25_pt
 kiwipiepy
+
+wandb
+gitpython
+pre-commit

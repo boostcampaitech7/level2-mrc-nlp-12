@@ -54,10 +54,8 @@ def main():
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    training_args.do_train = True
-    
-    
-    args = parser.parse_args()
+
+    # training_args.do_train = True
 
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
@@ -76,6 +74,7 @@ def main():
     set_seed(training_args.seed)
 
     datasets = load_from_disk(data_args.dataset_name)
+    print(datasets)
 
     # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
     # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
@@ -205,6 +204,15 @@ def main():
     # if training_args.do_train_poly:
         # train_polyencoder_with_bm25(poly_encoder) 
 
+    # True일 경우 : run passage retrieval
+    # if data_args.eval_retrieval:
+    #     datasets = run_sparse_retrieval(
+    #         tokenizer.tokenize,
+    #         datasets,
+    #         training_args,
+    #         data_args,
+    #     )
+
     # eval or predict mrc model
     if training_args.do_eval or training_args.do_predict:
         run_mrc(data_args, training_args, model_args, datasets, tokenizer, model)
@@ -224,14 +232,13 @@ def run_retrieval(
         tokenize_fn=tokenize_fn, q_tokenize_fn=q_tokenize_fn, data_path=data_path, context_path=context_path
     )
 
-    # if data_args.use_faiss:
-    #     retriever.build_faiss(num_clusters=data_args.num_clusters)
-    #     df = retriever.retrieve_faiss(
-    #         datasets["validation"], topk=data_args.top_k_retrieval
-    #     )
-    # else:
-    
-    df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval) 
+    if data_args.use_faiss:
+        retriever.build_faiss(num_clusters=data_args.num_clusters)
+        df = retriever.retrieve_faiss(
+            datasets["validation"], topk=data_args.top_k_retrieval
+        )
+    else:
+        df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval) 
     
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
@@ -271,8 +278,8 @@ def run_mrc(
     tokenizer,
     model,
 ) -> NoReturn:
-        
-    model.resize_token_embeddings(len(tokenizer))
+    
+    # model.resize_token_embeddings(len(tokenizer))
 
     # eval 혹은 prediction에서만 사용함
     column_names = datasets["validation"].column_names
@@ -283,7 +290,7 @@ def run_mrc(
 
     # Padding에 대한 옵션을 설정합니다.
     # (question|context) 혹은 (context|question)로 세팅 가능합니다.
-    pad_on_right = tokenizer.padding_side == "right" 
+    pad_on_right = tokenizer.padding_side == "right"
 
     # 오류가 있는지 확인합니다.
     last_checkpoint, max_seq_length = check_no_error(
@@ -352,8 +359,7 @@ def run_mrc(
         examples,
         features,
         predictions: Tuple[np.ndarray, np.ndarray],
-        training_args: TrainingArguments,
-        top_k: int = 5  # top-k passages를 사용할 수 있도록 설정
+        training_args: TrainingArguments
     ) -> EvalPrediction:
         # Post-processing: start logits과 end logits을 original context의 정답과 match시킵니다.
         predictions = postprocess_qa_predictions(
@@ -361,6 +367,7 @@ def run_mrc(
             features=features,
             predictions=predictions,
             max_answer_length=data_args.max_answer_length,
+            output_dir=training_args.output_dir,
         )
         # Metric을 구할 수 있도록 Format을 맞춰줍니다.
         formatted_predictions = [

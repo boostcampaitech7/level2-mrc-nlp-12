@@ -1,11 +1,13 @@
 import logging
 import os
-import sys
 import random
-import numpy as np
-import torch
+import sys
+from collections import defaultdict
 from typing import NoReturn
 
+import numpy as np
+import torch
+import wandb
 from arguments import DataTrainingArguments, ModelArguments
 from datasets import DatasetDict, load_from_disk, load_metric
 from trainer_qa import QuestionAnsweringTrainer
@@ -19,19 +21,19 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from utils import check_git_status, create_experiment_dir, get_arguments, save_args
 from utils_qa import check_no_error, postprocess_qa_predictions
-
 
 seed = 2024
 deterministic = False
 
-random.seed(seed) # python random seed 고정
-np.random.seed(seed) # numpy random seed 고정
-torch.manual_seed(seed) # torch random seed 고정
+random.seed(seed)  # python random seed 고정
+np.random.seed(seed)  # numpy random seed 고정
+torch.manual_seed(seed)  # torch random seed 고정
 torch.cuda.manual_seed_all(seed)
-if deterministic: # cudnn random seed 고정 - 고정 시 학습 속도가 느려질 수 있습니다. 
-	torch.backends.cudnn.deterministic = True
-	torch.backends.cudnn.benchmark = False
+if deterministic:  # cudnn random seed 고정 - 고정 시 학습 속도가 느려질 수 있습니다.
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 logger = logging.getLogger(__name__)
@@ -41,14 +43,15 @@ def main():
     # 가능한 arguments 들은 ./arguments.py 나 transformer package 안의 src/transformers/training_args.py 에서 확인 가능합니다.
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
 
-    parser = HfArgumentParser(
-        (ModelArguments, DataTrainingArguments, TrainingArguments)
-    )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    commit_id = check_git_status()
+    experiment_dir = create_experiment_dir(commit_id=commit_id)
+
+    model_args, data_args, training_args, json_args = get_arguments(experiment_dir)
+
     print(model_args.model_name_or_path)
 
     # [참고] argument를 manual하게 수정하고 싶은 경우에 아래와 같은 방식을 사용할 수 있습니다
-    training_args.per_device_train_batch_size = 16
+    # training_args.per_device_train_batch_size = 4
     # print(training_args.per_device_train_batch_size)
 
     print(f"model is from {model_args.model_name_or_path}")
@@ -59,6 +62,25 @@ def main():
         format="%(asctime)s - %(levelname)s - %(name)s -    %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    # wandb 설정
+    os.environ["WANDB_PROJECT"] = (
+        "MRC"  # set the wandb project where this run will be logged
+    )
+    os.environ["WANDB_LOG_MODEL"] = (
+        "true"  # save your trained model checkpoint to wandb
+    )
+    os.environ["WANDB_WATCH"] = "false"  # turn off watch to log faster
+    training_args.logging_steps = 100  # 로그 기록 주기
+    training_args.eval_steps = training_args.logging_steps
+    training_args.evaluation_strategy = "steps"
+    training_args.report_to = [
+        "wandb"
+    ]  # pass "wandb" to the 'report_to' parameter to turn on wandb logging
+
+    wandb.init(
+        project="MRC", name=training_args.run_name if training_args.run_name else None
     )
 
     # verbosity 설정 : Transformers logger의 정보로 사용합니다 (on main process only)
@@ -73,14 +95,18 @@ def main():
     # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
     # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
     config = AutoConfig.from_pretrained(
-        model_args.config_name
-        if model_args.config_name is not None
-        else model_args.model_name_or_path,
+        (
+            model_args.config_name
+            if model_args.config_name is not None
+            else model_args.model_name_or_path
+        ),
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name
-        if model_args.tokenizer_name is not None
-        else model_args.model_name_or_path,
+        (
+            model_args.tokenizer_name
+            if model_args.tokenizer_name is not None
+            else model_args.model_name_or_path
+        ),
         # 'use_fast' argument를 True로 설정할 경우 rust로 구현된 tokenizer를 사용할 수 있습니다.
         # False로 설정할 경우 python으로 구현된 tokenizer를 사용할 수 있으며,
         # rust version이 비교적 속도가 빠릅니다.
@@ -104,6 +130,9 @@ def main():
     if training_args.do_train or training_args.do_eval:
         run_mrc(data_args, training_args, model_args, datasets, tokenizer, model)
 
+    # Save the final arguments
+    save_args(json_args, experiment_dir, commit_id)
+
 
 def run_mrc(
     data_args: DataTrainingArguments,
@@ -113,9 +142,6 @@ def run_mrc(
     tokenizer,
     model,
 ) -> NoReturn:
-    
-    training_args.save_steps=10000
-    training_args.save_total_limit=1
 
     # dataset을 전처리합니다.
     # training과 evaluation에서 사용되는 전처리는 아주 조금 다른 형태를 가집니다.
@@ -330,8 +356,6 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
-    
-    
     # Training
     if training_args.do_train:
         if last_checkpoint is not None:
@@ -373,6 +397,73 @@ def run_mrc(
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
+        # validation 데이터에 대해 predict
+        predictions = trainer.predict(
+            test_dataset=eval_dataset, test_examples=datasets["validation"]
+        )
+        preds = predictions.predictions
+        labels = predictions.label_ids
+
+        # dataset, prediction, answer, score을 묶어서 results에 할당
+        results = []
+        for i, (pred, label) in enumerate(zip(preds, labels)):
+            pred_text = pred["prediction_text"]
+            true_text = label["answers"]["text"][0]
+
+            score = metric.compute(predictions=[pred], references=[label])
+
+            results.append(
+                {
+                    "question": datasets["validation"][i]["question"],
+                    "context": datasets["validation"][i]["context"],
+                    "prediction": pred_text,
+                    "answer": true_text,
+                    "f1": score["f1"],
+                    "em": score["exact_match"],
+                }
+            )
+
+        # 정답을 맞춘것과 틀린것을 10개씩 출력 (f1 score 기준)
+        results_sorted = sorted(results, key=lambda x: x["f1"], reverse=True)
+        print("*** 상위 10개 예측 ***")
+        for result in results_sorted[:10]:
+            print(f"Context: {result['context'][:50]}...")
+            print(f"Question: {result['question']}")
+            print(f"Prediction: {result['prediction']}")
+            print(f"Answer: {result['answer']}")
+            print(f"f1: {result['f1']}")
+            print(f"em: {result['em']}")
+            print()
+
+        print("*** 하위 10개 예측 ***")
+        for result in results_sorted[-10:]:
+            print(f"Context: {result['context'][:50]}...")
+            print(f"Question: {result['question']}")
+            print(f"Prediction: {result['prediction']}")
+            print(f"Answer: {result['answer']}")
+            print(f"f1: {result['f1']}")
+            print(f"em: {result['em']}")
+            print()
+
+        # 같은 context에 대한 질문들 출력
+        print("*** 같은 context에 대한 질문 pair ***")
+        context_to_results = defaultdict(list)
+        for result in results_sorted:
+            context = result["context"]
+            context_to_results[context].append(result)
+
+        for context, results in context_to_results.items():
+            if len(results) > 1:
+                print(f"Context: {context[:50]}...")
+                for result in results:
+                    print(f"  Question: {result['question']}")
+                    print(f"  Prediction: {result['prediction']}")
+                    print(f"  Answer: {result['answer']}")
+                    print(f"  f1: {result['f1']}")
+                    print(f"  em: {result['em']}")
+                    print()
+
 
 if __name__ == "__main__":
     main()
+    wandb.finish()  # finish the wandb run
