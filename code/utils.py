@@ -17,16 +17,16 @@ def check_git_status():
     return repo.head.commit.hexsha
 
 
-def create_experiment_dir(base_dir="../experiments", commit_id=""):
+def create_experiment_dir(base_dir="../experiments"):
     kst = timezone(timedelta(hours=9))
-    timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M%S_")
-    experiment_dir = os.path.join(base_dir, timestamp + commit_id)
+    timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M%S")
+    experiment_dir = os.path.join(base_dir, timestamp)
     os.makedirs(experiment_dir, exist_ok=True)
     return experiment_dir
 
 
 def save_args(args_dict, experiment_dir, commit_id):
-    args_path = os.path.join(experiment_dir, "config.json")
+    args_path = os.path.join(experiment_dir, "args.json")
     with open(args_path, "w") as f:
         json.dump(args_dict, f, indent=4)
 
@@ -48,8 +48,7 @@ def get_arguments(experiment_dir):
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
 
-    # Load arguments from config.json
-    args_json_path = "../config.json"
+    args_json_path = "../argument.json"
     if os.path.exists(args_json_path):
         json_args = load_args_from_json(args_json_path)
     else:
@@ -74,8 +73,7 @@ def get_inference_arguments(experiment_dir):
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
 
-    # Load arguments from config.json
-    args_json_path = "../config_inference.json"
+    args_json_path = "../argument_inference.json"
     if os.path.exists(args_json_path):
         json_args = load_args_from_json(args_json_path)
     else:

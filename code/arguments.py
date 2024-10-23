@@ -26,6 +26,22 @@ class ModelArguments:
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
+    data_path: Optional[str] = field(
+        default="../data",
+        metadata={"help": "A path where datas are stored at"},
+    )
+    context_path: Optional[str] = field(
+        default="wikipedia_documents.json",
+        metadata={
+            "help": "Filename that contain passages for training under data_path"
+        },
+    )
+    return_token_type_ids: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "True if you are using BERT based model, False if you are using RoBERTa based model"
+        },
+    )
 
 
 @dataclass
