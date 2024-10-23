@@ -47,7 +47,7 @@ def main():
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
 
     commit_id = check_git_status()
-    experiment_dir = create_experiment_dir(commit_id=commit_id)
+    experiment_dir = create_experiment_dir(experiment_type="inference")
 
     model_args, data_args, training_args, json_args = get_inference_arguments(
         experiment_dir
@@ -138,6 +138,7 @@ def run_sparse_retrieval(
         df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
 
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
+    f = None
     if training_args.do_predict:
         f = Features(
             {

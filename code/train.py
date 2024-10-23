@@ -44,7 +44,7 @@ def main():
     # --help flag 를 실행시켜서 확인할 수 도 있습니다.
 
     commit_id = check_git_status()
-    experiment_dir = create_experiment_dir(commit_id=commit_id)
+    experiment_dir = create_experiment_dir(experiment_type="train")
 
     model_args, data_args, training_args, json_args = get_arguments(experiment_dir)
 

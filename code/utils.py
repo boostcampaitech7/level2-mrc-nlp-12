@@ -17,9 +17,9 @@ def check_git_status():
     return repo.head.commit.hexsha
 
 
-def create_experiment_dir(base_dir="../experiments"):
+def create_experiment_dir(base_dir="../experiments", experiment_type=""):
     kst = timezone(timedelta(hours=9))
-    timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(kst).strftime("%Y%m%d_%H%M%S_" + experiment_type)
     experiment_dir = os.path.join(base_dir, timestamp)
     os.makedirs(experiment_dir, exist_ok=True)
     return experiment_dir
@@ -48,7 +48,7 @@ def get_arguments(experiment_dir):
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
 
-    args_json_path = "../argument.json"
+    args_json_path = "../args.json"
     if os.path.exists(args_json_path):
         json_args = load_args_from_json(args_json_path)
     else:
@@ -73,7 +73,7 @@ def get_inference_arguments(experiment_dir):
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
 
-    args_json_path = "../argument_inference.json"
+    args_json_path = "../args_inference.json"
     if os.path.exists(args_json_path):
         json_args = load_args_from_json(args_json_path)
     else:
