@@ -1,9 +1,7 @@
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk, Dataset, concatenate_datasets
 import pandas as pd
+import random
 
-
-from datasets import load_from_disk
-import pandas as pd
 
 t_dataset = load_from_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset")
 train = t_dataset["train"]
@@ -25,39 +23,51 @@ sample_dataset = dataset["train"].shuffle(seed=42).select(range(8000))
 # sample_dataset을 pandas DataFrame으로 변환
 sample_df = sample_dataset.to_pandas()
 
+c_sampled_df = []
 # 'answers' 필드를 train과 같은 형식으로 변환
-def transform_answers(row):
-    return {
-        "text": row["answers"]["text"] if "text" in row["answers"] else [],
-        "answer_start": row["answers"]["answer_start"] if "answer_start" in row["answers"] else []
+for idx in range(len(sample_df)):
+    new_example = {
+        "title": sample_df[idx]["title"],
+        "context": sample_df[idx]["context"],
+        "question": sample_df[idx]["question"],
+        "id": sample_df[idx]["id"],
+        "answers": sample_df[idx]["answers"],
+        "document_id": None
     }
-
-sample_df["answers"] = sample_df.apply(transform_answers, axis=1)
-
-# train에 필요한 모든 열을 포함하도록 맞춤
-columns_needed = ["id", "title", "context", "question", "answers"]
-for col in columns_needed:
-    if col not in sample_df.columns:
-        if col == "title":
-            sample_df[col] = ""  # title은 빈 문자열로 채움
-        else:
-            sample_df[col] = None
-
+    c_sampled_df.append(new_example)
+print("train 추가 데이터셋")
+print(c_sample_df.head())
 # 다시 데이터셋 형식으로 변환
-sample_dataset_fixed = Dataset.from_pandas(sample_df)
+sample_dataset_fixed = Dataset.from_pandas(c_sample_df)
 
 # train 데이터와 sample_dataset_fixed 병합
-combined_dataset = train.concatenate(sample_dataset_fixed)
+combined_dataset = concatenate_datasets([train, sample_dataset_fixed])
+print("train 병합")
+print(combined_dataset[3950:3955])
+# sample_dataset을 pandas DataFrame으로 변환하고 context 부분만 추출
+sample_df = sample_dataset.to_pandas()
 
-# dataset에서 context 부분을 wiki에 추가하기 위해 context 부분을 pandas로 변환
-context_df = sample_df[["context"]]
+# wiki 데이터 포맷에 맞게 context 데이터를 추가할 빈 데이터프레임 생성
+new_rows = pd.DataFrame({
+    "text": sample_df["context"],  # context 내용을 text로 추가
+    "corpus_source": None,       # 나머지 값들은 비워둠 (None 또는 기본값)
+    "url": "TODO",
+    "domain": None,
+    "title": None,
+    "author": None,
+    "html": None,
+    "document_id": None
+})
 
-# wiki 데이터에 context 추가 후 중복 제거
-wiki_combined = pd.concat([wiki, context_df], ignore_index=True)
-wiki_unique = wiki_combined.drop_duplicates(subset="context")
+# 기존의 wiki 데이터에 새로운 행 추가
+combined_df = pd.concat([wiki, new_rows], ignore_index=True)
+
+# 중복된 'text' 제거
+wiki_unique = combined_df.drop_duplicates(subset="text")
+wiki_unique = wiki_unique.transpose()
 
 # 중복 제거된 데이터를 새로운 json 파일로 저장
-wiki_unique.to_json("./data/wikipedia_documents_combined_unique.json", orient='records', force_ascii=False)
+wiki_unique.to_json("./data/wikipedia_documents_combined.json", orient='records', force_ascii=False)
 
 # 새로운 train dataset 저장
 combined_dataset.save_to_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset_combined")
