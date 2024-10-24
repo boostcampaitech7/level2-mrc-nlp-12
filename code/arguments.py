@@ -9,7 +9,7 @@ class ModelArguments:
     """
 
     model_name_or_path: str = field(
-        default="monologg/kobigbird-bert-base",
+        default="uomnf97/klue-roberta-finetuned-korquad-v2",
         metadata={
             "help": "Path to pretrained model or model identifier from huggingface.co/models"
         },
