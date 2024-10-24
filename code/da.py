@@ -27,21 +27,23 @@ c_sampled_df = []
 # 'answers' 필드를 train과 같은 형식으로 변환
 for idx in range(len(sample_df)):
     new_example = {
-        "title": sample_df[idx]["title"],
-        "context": sample_df[idx]["context"],
-        "question": sample_df[idx]["question"],
-        "id": sample_df[idx]["id"],
-        "answers": sample_df[idx]["answers"],
+        "title": sample_df.iloc[idx]["title"],
+        "context": sample_df.iloc[idx]["context"],
+        "question": sample_df.iloc[idx]["question"],
+        "id": sample_df.iloc[idx]["id"],
+        "answers": sample_df.iloc[idx]["answers"],
         "document_id": None
     }
     c_sampled_df.append(new_example)
 print("train 추가 데이터셋")
-print(c_sample_df.head())
+print(c_sampled_df[0:5])
 # 다시 데이터셋 형식으로 변환
-sample_dataset_fixed = Dataset.from_pandas(c_sample_df)
+c_sampled_df = pd.DataFrame(c_sampled_df)
+sample_dataset_fixed = Dataset.from_pandas(c_sampled_df)
 
 # train 데이터와 sample_dataset_fixed 병합
 combined_dataset = concatenate_datasets([train, sample_dataset_fixed])
+
 print("train 병합")
 print(combined_dataset[3950:3955])
 # sample_dataset을 pandas DataFrame으로 변환하고 context 부분만 추출
