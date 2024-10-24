@@ -1,14 +1,16 @@
 import os
 import json
+import argparse
 from collections import Counter, defaultdict
 
 
 
 
 class HardVotingEnsemble:
-    def __init__(self, predictions_dir, output_dir):
+    def __init__(self, predictions_dir, output_dir, method='hard'):
         self.predictions_dir = predictions_dir
         self.output_dir = output_dir
+        self.method = method
         self.prediction_files = []
         self.votes = defaultdict(list)
 
@@ -28,6 +30,15 @@ class HardVotingEnsemble:
         for id, preds in self.votes.items():
             final_predictions[id] = max(set(preds), key=preds.count)
         return final_predictions
+
+    def soft_vote(self):
+        final_predictions = {}
+        for id, preds in self.votes.items():
+            prob_dict = defaultdict(float)
+            for pred in preds:
+                for choice in pred:
+                    prob_dict[choice['text']] += choice['probability']
+            final_
 
     def save_results(self):
         os.makedirs(self.output_dir, exist_ok=True)
