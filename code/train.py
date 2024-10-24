@@ -464,21 +464,6 @@ def run_mrc(
                     print(f"  f1: {result['f1']}")
                     print(f"  em: {result['em']}")
                     print()
-        
-
-        # train data predictions을 json으로 출력
-        predictions = trainer.predict(
-            test_dataset=train_dataset, test_examples=datasets["train"]
-        )
-        pred_texts = predictions.predictions["prediction_text"]
-        ids = dataset['train']['id']
-
-        paired_data = [{id_: pred_text} for id_, pred_text in zip(ids, pred_texts)]
-
-        with open('CHANGE_NAME_TO_NUMBER.json', 'w', encoding='utf-8') as f:
-            json.dump(paired_data, f, ensure_ascii=False, indent=4)
-
-        print("Data saved to CHANGE_NAME_TO_NUMBER.json")
 
 
 if __name__ == "__main__":
