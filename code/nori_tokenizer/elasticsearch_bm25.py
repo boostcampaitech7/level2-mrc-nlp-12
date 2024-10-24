@@ -45,44 +45,21 @@ def get_index_settings():
     Elasticsearch 인덱스 설정 반환
     """
     settings = { 
-        "settings": { 
+        "settings": {
+            'similarity': {'default': {'type': 'BM25'}},
             "analysis": {
                 "tokenizer": {
                     "nori_tokenizer": {
                         "type": "nori_tokenizer", 
-                        "decompound_mode": "discard"
+                        "decompound_mode": "mixed"
                     }
                 },
                 "filter": {
-                    "nori_part_of_speech_filter": {
-                        "type": "nori_part_of_speech",
-                        "stoptags": [  # 제외할 품사 태그 목록
-                            "E",  # 어미
-                            "IC",  # 감탄사
-                            "J",  # 조사
-                            "MAG",  # 일반 부사
-                            "MAJ",  # 접속 부사
-                            "MM",  # 관형사
-                            "SP",  # 문장 부호
-                            "SSC", "SSO",  # 괄호
-                            "SC",  # 구두점
-                            "SE",  # 줄임표
-                            "XPN",  # 접두사
-                            "XSA",  # 형용사 파생 접미사
-                            "XSN",  # 명사 파생 접미사
-                            "XSV"  # 동사 파생 접미사
-                        ]
-                    },
                     "shingle_filter": {
                         "type": "shingle",
                         "min_shingle_size": 2,
                         "max_shingle_size": 2,
-                        "output_unigrams": True
-                    }, 
-                    "korean_stop": {
-                        "type": "stop",
-                        "stopwords": ["은", "는", "이", "가", "을", "를", "에", "의", "그", "인", '않', "되", "안",], 
-                        "enable_position_increments": "false"
+                        "output_unigrams": True,
                     }
                 },
                 "analyzer": {
@@ -90,10 +67,7 @@ def get_index_settings():
                         "type": "custom",
                         "tokenizer": "nori_tokenizer",
                         "filter": [
-                            "nori_part_of_speech_filter",  # 품사 필터 적용
-                            "lowercase",
-                            "shingle_filter", 
-                            "korean_stop"
+                            "shingle_filter"
                         ]
                     }
                 }

@@ -3,6 +3,7 @@ import os
 import pickle
 import time
 import random
+from elasticsearch import Elasticsearch
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
@@ -22,7 +23,8 @@ from transformers import AutoTokenizer, AutoModel, AdamW, get_linear_schedule_wi
 from tqdm.auto import tqdm 
 from rank_bm25 import BM25Okapi 
 from kiwipiepy import Kiwi 
-from konlpy.tag import Okt
+from konlpy.tag import Okt 
+from pororo import Pororo
 
 
 
@@ -46,7 +48,9 @@ class SparseRetrieval:
         q_tokenize_fn,
         data_path: Optional[str] = "../data/",
         context_path: Optional[str] = "wikipedia_documents.json",
-        index_file: Optional[str] = "bm25_index.pkl"
+        index_file: Optional[str] = "bm25_index.pkl", 
+        es: Elasticsearch = None, 
+        INDEX: str = ''
     ) -> NoReturn:
 
         """
@@ -77,22 +81,55 @@ class SparseRetrieval:
         with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
-        self.contexts = list(
-            dict.fromkeys([v["text"] for v in wiki.values()])
-        )
+        self.contexts = list({tuple(sorted(d.items())) for d in [{ 
+                                    "id": v["document_id"], 
+                                    "title": v["title"], 
+                                    "content": v["text"] 
+                                } for v in wiki.values()]})
+        
         # 저장된 인덱스 파일이 있으면 로드, 없으면 새로 생성
-        if os.path.isfile(self.index_file):
-            print("Loading BM25 index from pickle file...")
-            with open(self.index_file, "rb") as f:
-                self.BM25 = pickle.load(f)
-        else:
-            print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
-            self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)] 
-            self.BM25 = BM25Okapi(self.tokenized_contexts, k1=1.2, b=0.75)
-            with open(self.index_file, "wb") as f:
-                pickle.dump(self.BM25, f)
-            print("BM25 index saved to pickle.")
+        # if os.path.isfile(self.index_file):
+        #     print("Loading BM25 index from pickle file...")
+        #     with open(self.index_file, "rb") as f:
+        #         self.BM25 = pickle.load(f)
+        # else:
+        #     print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
+        #     self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)] 
+        #     print("Tokenized Contexts Head: ", self.tokenized_contexts[:5])
+            
+        #     # self.BM25 = BM25Okapi(self.tokenized_contexts, k1=1.2, b=0.75)
+        #     with open(self.index_file, "wb") as f:
+        #         pickle.dump(self.BM25, f)
+        #     print("BM25 index saved to pickle.")
+        
+        # Elasticsearch의 BM25Retrieval을 사용
+        MAX_LENGTH = 512 
+        
+        # 긴 지문을 일정한 길이로 분할하는 함수
+        def split_long_content(content, max_length=MAX_LENGTH):
+            return [content[i:i+max_length] for i in range(0, len(content), max_length)]
+        
+        print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
+        
+        # Pororo NER 태스크 불러오기
+        ner = Pororo(task="ner", lang="ko")
+            
+        
+        for doc in tqdm(self.contexts, desc="Make BM25: "):
+            content_splits = split_long_content(doc[0])
+            for i, content in enumerate(content_splits): 
+                ner_result = ner(content)
+                named_entities = " ".join([entity[0] for entity in ner_result if entity[1] != 'O'])  # 'O'는 개체명이 아닌 일반 단어
+                augmented_content = f"{named_entities} {content}" if named_entities else content
+                doc_dict = { 
+                    "id": f"{str(doc[1])}_{i}",  # 각 분할된 지문에 고유 ID 부여
+                    "title": doc[2], 
+                    "content": augmented_content
+                }
+                # es.indices.delete(index=INDEX, id=doc[1])
+                es.index(index=INDEX, id=doc_dict['id'], body=doc_dict)
 
+            
     def build_faiss(self, num_clusters=64) -> NoReturn:
 
         """
@@ -130,6 +167,79 @@ class SparseRetrieval:
             faiss.write_index(self.indexer, indexer_path)
             print("Faiss Indexer Saved.")
 
+    def retrieve_es(
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10, es: Elasticsearch = None, INDEX: str = ''):
+        if isinstance(query_or_dataset, str):
+            query = {
+                'size': topk, 
+                'query': { 
+                    'match': {
+                        'content': query_or_dataset
+                    }
+                }
+            }
+            response = es.search(index=INDEX, body=query)
+            print("[Search query]\n", query_or_dataset, "\n") 
+            
+            # Elasticsearch의 검색 결과를 처리
+            doc_scores = []
+            topk_indices = []
+            
+            # 결과 출력 및 점수 수집
+            for hit in response['hits']['hits']:
+                doc_scores.append(hit['_score'])  # Elasticsearch의 _score 값을 점수로 사용
+                topk_indices.append(hit['_id'])   # 문서의 ID를 topk 인덱스처럼 사용
+
+                # 결과 출력 (선택적으로 주석 해제하여 사용)
+                print(f"Passage ID: {hit['_id']} with score {hit['_score']:.4f}")
+                print(f"Content: {hit['_source']['content']}\n")
+            
+            
+        elif isinstance(query_or_dataset, Dataset): 
+            # 여러 쿼리 처리
+            total = []
+            for idx, example in enumerate(tqdm(query_or_dataset, desc="BM25 retrieval")):
+                query = example["question"]
+
+                # Elasticsearch 쿼리 작성
+                es_query = {
+                    'size': topk,  # topk 설정
+                    'query': { 
+                        'match': {
+                            'content': query  # question에 해당하는 내용으로 검색
+                        }
+                    }
+                }
+                
+                # Elasticsearch 검색 실행
+                response = es.search(index=INDEX, body=es_query)
+                
+                # 결과 정리
+                topk_contexts = []
+                for hit in response['hits']['hits']:
+                    content = hit['_source']['content']
+                    # content가 리스트라면 이를 문자열로 변환
+                    topk_contexts.append(content[1])
+                    
+                
+                    
+                # 현재 쿼리의 결과 저장
+                tmp = {
+                    "question": query,
+                    "id": query_or_dataset["id"][idx],
+                    "context": " ".join(topk_contexts)  # 검색된 상위 컨텍스트들을 합침
+                }
+                
+                # 만약 answers 키가 있으면 답변도 포함
+                if "answers" in example.keys():
+                    tmp["answers"] = example["answers"]
+                    
+                total.append(tmp)
+                
+            # 결과를 데이터프레임으로 변환하여 반환
+            cqas = pd.DataFrame(total)
+            return cqas
+            
     def retrieve(
         self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
     ) -> Union[Tuple[List[float], List[int]], pd.DataFrame]:
@@ -141,7 +251,8 @@ class SparseRetrieval:
         Returns:
             단일 Query의 경우 상위 passage들을 반환합니다.
             다수의 Query의 경우 DataFrame으로 반환합니다.
-        """
+        """ 
+        
 
         if isinstance(query_or_dataset, str):
             # 단일 쿼리 처리

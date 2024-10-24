@@ -7,6 +7,7 @@ Open-Domain Question Answering 을 수행하는 inference 코드 입니다.
 
 import logging
 import sys
+from elasticsearch import Elasticsearch
 import torch
 import numpy as np
 import urllib3
@@ -74,7 +75,6 @@ def main():
     set_seed(training_args.seed)
 
     datasets = load_from_disk(data_args.dataset_name)
-    print(datasets)
 
     # AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
     # argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
@@ -189,16 +189,16 @@ def main():
     # True일 경우 : run passage retrieval
     # Elasticsearch 연결
     # 인덱스 생성
-    # settings = get_index_settings()
-    # INDEX = "bm25_tokenizer"
+    settings = get_index_settings()
+    INDEX = "bm25_tokenizer_2"
     
-    # es = create_es_connection(INDEX)
+    es = create_es_connection(INDEX)
     
-    # create_index(es, INDEX, settings)
+    create_index(es, INDEX, settings)
 
     if data_args.eval_retrieval: 
         datasets = run_retrieval(
-            okt_tokenize, okt_tokenize, datasets, training_args, data_args,
+            okt_tokenize, okt_tokenize, datasets, training_args, data_args, es=es, INDEX=INDEX
         )
         
     # if training_args.do_train_poly:
@@ -224,22 +224,24 @@ def run_retrieval(
     training_args: TrainingArguments,
     data_args: DataTrainingArguments,
     data_path: str = "../data",
-    context_path: str = "wikipedia_documents.json",
+    context_path: str = "wikipedia_documents.json", 
+    es: Elasticsearch = None, 
+    INDEX: str = ""
 ) -> DatasetDict:
 
     # Query에 맞는 Passage들을 Retrieval 합니다.
     retriever = SparseRetrieval(
-        tokenize_fn=tokenize_fn, q_tokenize_fn=q_tokenize_fn, data_path=data_path, context_path=context_path
+        tokenize_fn=tokenize_fn, q_tokenize_fn=q_tokenize_fn, data_path=data_path, context_path=context_path, es=es, INDEX=INDEX
     )
 
-    if data_args.use_faiss:
-        retriever.build_faiss(num_clusters=data_args.num_clusters)
-        df = retriever.retrieve_faiss(
-            datasets["validation"], topk=data_args.top_k_retrieval
-        )
-    else:
-        df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval) 
-    
+    # if data_args.use_faiss:
+    #     retriever.build_faiss(num_clusters=data_args.num_clusters)
+    #     df = retriever.retrieve_faiss(
+    #         datasets["validation"], topk=data_args.top_k_retrieval
+    #     )
+    # else:
+    df = retriever.retrieve_es(datasets["validation"], topk=data_args.top_k_retrieval, es=es)
+    f = None
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
         f = Features(
