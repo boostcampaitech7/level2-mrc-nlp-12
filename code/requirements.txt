@@ -10,3 +10,6 @@ pre-commit
 
 # faiss install (if you want to)
 faiss-gpu
+
+#question generation (for t5 model)
+sentencepiece
