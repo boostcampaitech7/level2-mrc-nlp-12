@@ -30,7 +30,7 @@ class SparseRetrieval:
         self,
         tokenize_fn,
         data_path: Optional[str] = "../data/",
-        context_path: Optional[str] = "wikipedia_documents.json",
+        context_path: Optional[str] = "wikipedia_documents_combined.json",
     ) -> NoReturn:
         """
         Arguments:
@@ -393,7 +393,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--data_path", metavar="./data", type=str, help="")
     parser.add_argument(
-        "--context_path", metavar="wikipedia_documents", type=str, help=""
+        "--context_path", metavar="wikipedia_documents_combined", type=str, help=""
     )
     parser.add_argument("--use_faiss", metavar=False, type=bool, help="")
 
