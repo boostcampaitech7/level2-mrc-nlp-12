@@ -87,7 +87,7 @@ def main():
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
-        #ignore_mismatched_sizes=True,
+        ignore_mismatched_sizes=True,
     )
 
     # True일 경우 : run passage retrieval
