@@ -1,7 +1,7 @@
 from datasets import load_dataset, load_from_disk, Dataset, concatenate_datasets
 import pandas as pd
 import random
-
+import numpy as np
 
 t_dataset = load_from_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset")
 train = t_dataset["train"]
@@ -31,7 +31,10 @@ for idx in range(len(sample_df)):
         "context": sample_df.iloc[idx]["context"],
         "question": sample_df.iloc[idx]["question"],
         "id": sample_df.iloc[idx]["id"],
-        "answers": sample_df.iloc[idx]["answers"],
+        "answers": {
+            "text": sample_df.iloc[idx]["answers"]["text"],
+            "answer_start": sample_df.iloc[idx]["answers"]["answer_start"].astype(np.int64),
+        },
         "document_id": None
     }
     c_sampled_df.append(new_example)
@@ -66,10 +69,10 @@ combined_df = pd.concat([wiki, new_rows], ignore_index=True)
 
 # 중복된 'text' 제거
 wiki_unique = combined_df.drop_duplicates(subset="text")
-wiki_unique = wiki_unique.transpose()
+#wiki_unique = wiki_unique.transpose()
 
 # 중복 제거된 데이터를 새로운 json 파일로 저장
-wiki_unique.to_json("./data/wikipedia_documents_combined.json", orient='records', force_ascii=False)
+wiki_unique.to_json("../data/wikipedia_documents_combined.json", orient='index', force_ascii=False)
 
 # 새로운 train dataset 저장
 combined_dataset.save_to_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset_combined")
