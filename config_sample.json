@@ -1,5 +1,6 @@
 {
     "model_name_or_path": "klue/bert-base",
+    "run_name": "klue/bert-base/paraphrase_dataset",
     "do_train": false,
     "do_eval": false,
     "do_predict": false,
