@@ -26,6 +26,10 @@ class ModelArguments:
             "help": "Pretrained tokenizer name or path if not the same as model_name"
         },
     )
+    data_path: Optional[str] = field(
+        default="../data",
+        metadata={"help": ""},
+    )
 
 
 @dataclass
@@ -89,4 +93,12 @@ class DataTrainingArguments:
     )
     use_faiss: bool = field(
         default=False, metadata={"help": "Whether to build with faiss"}
+    )
+    context_path: Optional[str] = field(
+        default="../data/wikipedia_documents.json",
+        metadata={"help": ""},
+    )
+    return_token_type_ids: Optional[str] = field(
+        default=None,
+        metadata={"help": "False if using RoBERTa model, True if using BERT"},
     )

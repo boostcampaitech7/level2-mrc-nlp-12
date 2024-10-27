@@ -17,5 +17,8 @@
     "save_strategy": "steps",
     "save_steps": 10000,
     "seed": 42,
-    "fp16": false
+    "fp16": false,
+    "WANDB_PROJECT": "MRC",
+    "WANDB_LOG_MODEL": true,
+    "WANDB_WATCH": false
 }

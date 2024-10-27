@@ -34,7 +34,15 @@ class QuestionAnsweringTrainer(Trainer):
         self.eval_examples = eval_examples
         self.post_process_function = post_process_function
 
-    def evaluate(self, eval_dataset=None, eval_examples=None, ignore_keys=None):
+    def evaluate(
+        self,
+        eval_dataset=None,
+        eval_examples=None,
+        ignore_keys=None,
+        data_args=None,
+        column_names=None,
+        datasets=None,
+    ):
         eval_dataset = self.eval_dataset if eval_dataset is None else eval_dataset
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         eval_examples = self.eval_examples if eval_examples is None else eval_examples
@@ -62,7 +70,13 @@ class QuestionAnsweringTrainer(Trainer):
 
         if self.post_process_function is not None and self.compute_metrics is not None:
             eval_preds = self.post_process_function(
-                eval_examples, eval_dataset, output.predictions, self.args
+                eval_examples,
+                eval_dataset,
+                output.predictions,
+                self.args,
+                data_args,
+                column_names,
+                datasets,
             )
             metrics = self.compute_metrics(eval_preds)
 
@@ -79,7 +93,15 @@ class QuestionAnsweringTrainer(Trainer):
         )
         return metrics
 
-    def predict(self, test_dataset, test_examples, ignore_keys=None):
+    def predict(
+        self,
+        test_dataset,
+        test_examples,
+        ignore_keys=None,
+        data_args=None,
+        column_names=None,
+        datasets=None,
+    ):
         test_dataloader = self.get_test_dataloader(test_dataset)
 
         # 일시적으로 metric computation를 불가능하게 한 상태이며, 해당 코드에서는 loop 내에서 metric 계산을 수행합니다.
@@ -108,6 +130,12 @@ class QuestionAnsweringTrainer(Trainer):
             )
 
         predictions = self.post_process_function(
-            test_examples, test_dataset, output.predictions, self.args
+            test_examples,
+            test_dataset,
+            output.predictions,
+            self.args,
+            data_args,
+            column_names,
+            datasets,
         )
         return predictions

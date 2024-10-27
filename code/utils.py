@@ -1,11 +1,19 @@
 import json
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import git
 from arguments import DataTrainingArguments, ModelArguments
-from transformers import HfArgumentParser, TrainingArguments
+from transformers import (
+    AutoConfig,
+    AutoModelForQuestionAnswering,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+    HfArgumentParser,
+    TrainingArguments,
+)
 
 
 def check_git_status():
@@ -86,3 +94,85 @@ def get_combined_args(json_args):
     # Command-line arguments come after to override json_args
     combined_args = json_args_list + sys.argv[1:]
     return combined_args
+
+
+def get_data_collator(tokenizer, training_args):
+    # Data collator
+    # flag가 True이면 이미 max length로 padding된 상태입니다.
+    # 그렇지 않다면 data collator에서 padding을 진행해야합니다.
+    return DataCollatorWithPadding(
+        tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None
+    )
+
+
+def get_tokenizer_and_model(model_args):
+    """
+    AutoConfig를 이용하여 pretrained model 과 tokenizer를 불러옵니다.
+    argument로 원하는 모델 이름을 설정하면 옵션을 바꿀 수 있습니다.
+    """
+    config = AutoConfig.from_pretrained(
+        (
+            model_args.config_name
+            if model_args.config_name is not None
+            else model_args.model_name_or_path
+        ),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        (
+            model_args.tokenizer_name
+            if model_args.tokenizer_name is not None
+            else model_args.model_name_or_path
+        ),
+        # 'use_fast' argument를 True로 설정할 경우 rust로 구현된 tokenizer를 사용할 수 있습니다.
+        # False로 설정할 경우 python으로 구현된 tokenizer를 사용할 수 있으며,
+        # rust version이 비교적 속도가 빠릅니다.
+        use_fast=True,
+    )
+    model = AutoModelForQuestionAnswering.from_pretrained(
+        model_args.model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+        config=config,
+    )
+    return config, tokenizer, model
+
+
+def print_examples_on_evaluation(results):
+    # 정답을 맞춘것과 틀린것을 10개씩 출력 (f1 score 기준)
+    results_sorted = sorted(results, key=lambda x: x["f1"], reverse=True)
+    print("*** 상위 10개 예측 ***")
+    for result in results_sorted[:10]:
+        print(f"Context: {result['context'][:50]}...")
+        print(f"Question: {result['question']}")
+        print(f"Prediction: {result['prediction']}")
+        print(f"Answer: {result['answer']}")
+        print(f"f1: {result['f1']}")
+        print(f"em: {result['em']}")
+        print()
+
+    print("*** 하위 10개 예측 ***")
+    for result in results_sorted[-10:]:
+        print(f"Context: {result['context'][:50]}...")
+        print(f"Question: {result['question']}")
+        print(f"Prediction: {result['prediction']}")
+        print(f"Answer: {result['answer']}")
+        print(f"f1: {result['f1']}")
+        print(f"em: {result['em']}")
+        print()
+
+    # 같은 context에 대한 질문들 출력
+    print("*** 같은 context에 대한 질문 pair ***")
+    context_to_results = defaultdict(list)
+    for result in results_sorted:
+        context = result["context"]
+        context_to_results[context].append(result)
+
+    for context, results in context_to_results.items():
+        if len(results) > 1:
+            print(f"Context: {context[:50]}...")
+            for result in results:
+                print(f"  Question: {result['question']}")
+                print(f"  Prediction: {result['prediction']}")
+                print(f"  Answer: {result['answer']}")
+                print(f"  f1: {result['f1']}")
+                print(f"  em: {result['em']}")
+                print()
