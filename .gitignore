@@ -1,0 +1,14 @@
+*.tar.gz
+data/
+.env
+args*.json
+__pycache__/
+experiments/
+assets/
+models/
+outputs/
+wandb/
+.vscode/
+install/
+*.bak
+*.pkl
