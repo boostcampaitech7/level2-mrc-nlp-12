@@ -9,6 +9,8 @@ import sys
 from typing import Callable, Dict, List, NoReturn, Tuple
 
 import numpy as np
+import torch
+import urllib3
 from arguments import DataTrainingArguments, ModelArguments
 from custom_logger import CustomLogger
 from datasets import (
@@ -20,15 +22,12 @@ from datasets import (
     load_from_disk,
     load_metric,
 )
+from elasticsearch import Elasticsearch
 from retrieval import SparseRetrieval
 from trainer_qa import QuestionAnsweringTrainer, prepare_validation_features
 from transformers import (
-    AutoConfig,
-    AutoModelForQuestionAnswering,
-    AutoTokenizer,
     DataCollatorWithPadding,
     EvalPrediction,
-    HfArgumentParser,
     TrainingArguments,
     set_seed,
 )
@@ -36,7 +35,6 @@ from utils import (
     check_git_status,
     create_experiment_dir,
     get_arguments,
-    get_data_collator,
     get_tokenizer_and_model,
     print_examples_on_evaluation,
     save_args,
@@ -64,7 +62,6 @@ def main():
     print(f"data is from {data_args.dataset_name}")
 
     datasets = load_from_disk(data_args.dataset_name)
-    print(datasets)
 
     tokenizer, model = get_tokenizer_and_model(model_args)
 
@@ -75,6 +72,8 @@ def main():
             datasets,
             training_args,
             data_args,
+            model_args.data_path,
+            model_args.context_path,
         )
 
     # eval or predict mrc model
@@ -87,9 +86,14 @@ def main():
 
 def run_sparse_retrieval(
     tokenize_fn: Callable[[str], List[str]],
+    q_tokenize_fn: Callable[[str], List[str]],
     datasets: DatasetDict,
     training_args: TrainingArguments,
     data_args: DataTrainingArguments,
+    data_path: str = "../data",
+    context_path: str = "wikipedia_documents.json",
+    es: Elasticsearch = None,
+    INDEX: str = "",
 ) -> DatasetDict:
 
     # Query에 맞는 Passage들을 Retrieval 합니다.
@@ -97,8 +101,10 @@ def run_sparse_retrieval(
         tokenize_fn=tokenize_fn,
         data_path=data_args.data_path,
         context_path=data_args.context_path,
+        q_tokenize_fn=q_tokenize_fn,
+        es=es,
+        INDEX=INDEX,
     )
-    retriever.get_sparse_embedding()
 
     if data_args.use_faiss:
         retriever.build_faiss(num_clusters=data_args.num_clusters)
@@ -106,7 +112,9 @@ def run_sparse_retrieval(
             datasets["validation"], topk=data_args.top_k_retrieval
         )
     else:
-        df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
+        df = retriever.retrieve_es(
+            datasets["validation"], topk=data_args.top_k_retrieval, es=es
+        )
 
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
     if training_args.do_predict:
@@ -117,8 +125,6 @@ def run_sparse_retrieval(
                 "question": Value(dtype="string", id=None),
             }
         )
-
-    # train data 에 대해선 정답이 존재하므로 id question context answer 로 데이터셋이 구성됩니다.
     elif training_args.do_eval:
         f = Features(
             {
@@ -218,6 +224,16 @@ def run_mrc(
 
         trainer.log_metrics("test", metrics)
         trainer.save_metrics("test", metrics)
+
+
+def custom_loss_function(pos_scores, neg_scores, margin=1.0):
+    # Positive similarity를 최대화하고, Negative similarity를 최소화하도록 손실 계산
+    positive_loss = 1 - pos_scores
+    negative_loss = torch.clamp(neg_scores - margin, min=0.0)
+
+    # 두 손실의 평균을 구함
+    loss = positive_loss.mean() + negative_loss.mean()
+    return loss
 
 
 if __name__ == "__main__":

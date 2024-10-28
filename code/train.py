@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import sys
@@ -6,7 +7,6 @@ from typing import NoReturn
 import numpy as np
 import torch
 import wandb
-import json
 from arguments import DataTrainingArguments, ModelArguments
 from custom_logger import CustomLogger
 from datasets import DatasetDict, load_from_disk, load_metric
@@ -40,7 +40,7 @@ logger = CustomLogger(name=__name__)
 
 def main():
     commit_id = check_git_status()
-    experiment_dir = create_experiment_dir(commit_id=commit_id)
+    experiment_dir = create_experiment_dir(experiment_type="train")
 
     model_args, data_args, training_args, json_args = get_arguments(experiment_dir)
     logger.set_config()
@@ -157,7 +157,6 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
-
     # Training
     if training_args.do_train:
         if last_checkpoint is not None:
