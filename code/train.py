@@ -162,7 +162,6 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
-
     # Training
     if training_args.do_train:
         if last_checkpoint is not None:

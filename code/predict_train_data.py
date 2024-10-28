@@ -223,5 +223,6 @@ def run_mrc(
         "No metric can be presented because there is no correct answer given. Job done!"
     )
 
+
 if __name__ == "__main__":
     main()

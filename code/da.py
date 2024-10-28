@@ -1,12 +1,15 @@
-from datasets import load_dataset, load_from_disk, Dataset, concatenate_datasets
-import pandas as pd
 import random
+
 import numpy as np
+import pandas as pd
+from datasets import Dataset, concatenate_datasets, load_dataset, load_from_disk
 
 t_dataset = load_from_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset")
 train = t_dataset["train"]
 
-wiki = pd.read_json("/data/ephemeral/home/level2-mrc-nlp-12/data/wikipedia_documents.json").transpose()
+wiki = pd.read_json(
+    "/data/ephemeral/home/level2-mrc-nlp-12/data/wikipedia_documents.json"
+).transpose()
 dataset = load_dataset("squad_kor_v1")
 
 # corpus = list(set([example["context"] for example in dataset["train"]]))
@@ -33,9 +36,11 @@ for idx in range(len(sample_df)):
         "id": sample_df.iloc[idx]["id"],
         "answers": {
             "text": sample_df.iloc[idx]["answers"]["text"],
-            "answer_start": sample_df.iloc[idx]["answers"]["answer_start"].astype(np.int64),
+            "answer_start": sample_df.iloc[idx]["answers"]["answer_start"].astype(
+                np.int64
+            ),
         },
-        "document_id": None
+        "document_id": None,
     }
     c_sampled_df.append(new_example)
 print("train 추가 데이터셋")
@@ -53,26 +58,32 @@ print(combined_dataset[3950:3955])
 sample_df = sample_dataset.to_pandas()
 
 # wiki 데이터 포맷에 맞게 context 데이터를 추가할 빈 데이터프레임 생성
-new_rows = pd.DataFrame({
-    "text": sample_df["context"],  # context 내용을 text로 추가
-    "corpus_source": None,       # 나머지 값들은 비워둠 (None 또는 기본값)
-    "url": "TODO",
-    "domain": None,
-    "title": None,
-    "author": None,
-    "html": None,
-    "document_id": None
-})
+new_rows = pd.DataFrame(
+    {
+        "text": sample_df["context"],  # context 내용을 text로 추가
+        "corpus_source": None,  # 나머지 값들은 비워둠 (None 또는 기본값)
+        "url": "TODO",
+        "domain": None,
+        "title": None,
+        "author": None,
+        "html": None,
+        "document_id": None,
+    }
+)
 
 # 기존의 wiki 데이터에 새로운 행 추가
 combined_df = pd.concat([wiki, new_rows], ignore_index=True)
 
 # 중복된 'text' 제거
 wiki_unique = combined_df.drop_duplicates(subset="text")
-#wiki_unique = wiki_unique.transpose()
+# wiki_unique = wiki_unique.transpose()
 
 # 중복 제거된 데이터를 새로운 json 파일로 저장
-wiki_unique.to_json("../data/wikipedia_documents_combined.json", orient='index', force_ascii=False)
+wiki_unique.to_json(
+    "../data/wikipedia_documents_combined.json", orient="index", force_ascii=False
+)
 
 # 새로운 train dataset 저장
-combined_dataset.save_to_disk("/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset_combined")
+combined_dataset.save_to_disk(
+    "/data/ephemeral/home/level2-mrc-nlp-12/data/train_dataset_combined"
+)

@@ -4,12 +4,15 @@ transformers==4.25.1
 tqdm
 pandas
 scikit-learn
-wandb
-gitpython
-pre-commit
 
 # faiss install (if you want to)
 faiss-gpu
 
+bm25_pt
+kiwipiepy
+
+wandb
+gitpython
+pre-commit
 #question generation (for t5 model)
 sentencepiece

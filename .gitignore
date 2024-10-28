@@ -4,6 +4,7 @@ data/
 args*.json
 __pycache__/
 experiments/
+data/
 assets/
 models/
 models_reader/
@@ -11,7 +12,11 @@ outputs/
 wandb/
 .vscode/
 install/
+libraries/
 ensemble_outputs/
 predictions_for_ensemble/
 *.bak
 *.pkl
+*.pt
+*.pth
+*.log

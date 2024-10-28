@@ -153,11 +153,157 @@ def get_tokenizer_and_model(model_args):
         # rust version이 비교적 속도가 빠릅니다.
         use_fast=True,
     )
+
+    if model_args.use_kiwi:
+        from kiwipiepy import Kiwi
+
+        kiwi = Kiwi()
+
+        def kiwipiepy_tokenize(text):
+            try:
+                cleaned_text = text.encode("utf-8", "ignore").decode("utf-8")
+                tokens = kiwi.tokenize(cleaned_text)
+                # 불용어 제거와 특정 품사 필터링 (예: 명사, 형용사만 사용)
+                unigrams = [
+                    token.form
+                    for token in tokens
+                    if token.form not in stopwords and token.tag in {"NNG", "NNP", "VA"}
+                ]
+                # 명사만 선택
+                nouns = [
+                    token[0]
+                    for token in tokens
+                    if token[1] == "NNG" or token[1] == "NNP"
+                ]
+
+                # 명사 + 명사 bigram 생성
+                bigrams = [
+                    " ".join((nouns[i], nouns[i + 1])) for i in range(len(nouns) - 1)
+                ]
+
+                token_forms = unigrams + bigrams
+
+                return token_forms
+            except (UnicodeDecodeError, AttributeError) as e:
+                print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+                # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+                return []
+            except Exception as e:
+                # 예상치 못한 다른 에러 발생 시 처리
+                print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+                return []
+
+    if model_args.use_okt:
+        from konlpy.tag import Okt
+
+        okt = Okt()
+
+        def okt_tokenize(text):
+            try:
+                cleaned_text = text.encode("utf-8", "ignore").decode("utf-8")
+                tokens = okt.pos(cleaned_text)
+
+                # 불용어 제거와 특정 품사 필터링 (예: 명사, 형용사만 사용)
+                meaningful_token_forms = [
+                    token[0]
+                    for token in tokens
+                    if token[0] not in stopwords
+                    and token[1]
+                    in {
+                        "Noun",
+                        "Adjective",
+                        "Verb",
+                        "Adverb",
+                        "ProperNoun",
+                        "Determiner",
+                    }
+                ]
+
+                token_forms = [token[0] for token in tokens]
+
+                return meaningful_token_forms + token_forms
+            except (UnicodeDecodeError, AttributeError) as e:
+                print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+                # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+                return []
+            except Exception as e:
+                # 예상치 못한 다른 에러 발생 시 처리
+                print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+                return []
+
+    elif model_args.use_nori:
+        from nori_tokenizer.elasticsearch_bm25 import (
+            create_es_connection,
+            create_index,
+            get_index_settings,
+        )
+        from nori_tokenizer.nori import create_nori
+
+        settings = get_index_settings()
+        index_name = "bm25_tokenizer"
+        es = create_es_connection(index_name)
+        create_index(es, index_name, settings)
+
+        def nori_tokenize(text, es, INDEX):
+            try:
+                return create_nori(text, es, INDEX)
+            except (UnicodeDecodeError, AttributeError) as e:
+                print(f"유니코드 디코딩 오류 발생, 지문 건너뛰기: {e}")
+                # 오류 발생 시 빈 리스트를 반환하여 해당 지문을 무시
+                return []
+            except Exception as e:
+                # 예상치 못한 다른 에러 발생 시 처리
+                print(f"알 수 없는 오류 발생, 지문 건너뛰기: {e}")
+                return []
+
+    if model_args.use_stopwords:
+        stopwords = {
+            "이",
+            "그",
+            "저",
+            "것",
+            "수",
+            "그리고",
+            "그러나",
+            "또한",
+            "하지만",
+            "즉",
+            "또",
+            "의",
+            "가",
+            "을",
+            "를",
+            "에",
+            "에게",
+            "에서",
+            "로",
+            "부터",
+            "까지",
+            "와",
+            "과",
+            "도",
+            "은",
+            "는",
+            "이것",
+            "그것",
+            "저것",
+            "뭐",
+            "왜",
+            "어떻게",
+            "어디",
+            "누구",
+            "있다",
+            "없다",
+        }
+
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
     )
+
+    model.resize_token_embeddings(len(tokenizer))
+
     return config, tokenizer, model
 
 
