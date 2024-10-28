@@ -161,6 +161,12 @@ def run_mrc(
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=column_names,
         load_from_cache_file=not data_args.overwrite_cache,
+        fn_kwargs={
+            "tokenizer": tokenizer,
+            "column_names": column_names,
+            "max_seq_length": max_seq_length,
+            "data_args": data_args,
+        },
     )
 
     # Data collator

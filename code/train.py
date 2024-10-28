@@ -52,12 +52,6 @@ def main():
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
 
-    # wandb 설정
-    wandb.init(
-        project="mrc",
-        name="Check validation of krfkv2",
-    )
-
     datasets = load_from_disk(data_args.dataset_name)
     print(datasets)
 
@@ -113,11 +107,11 @@ def run_mrc(
                 "tokenizer": tokenizer,
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
-                "training_args": training_args,
                 "data_args": data_args,
+                "model_args": model_args,
             },
         )
-    elif training_args.do_eval:
+    if training_args.do_eval:
         eval_dataset = datasets["validation"]
         column_names = datasets["validation"].column_names
 
@@ -132,8 +126,8 @@ def run_mrc(
                 "tokenizer": tokenizer,
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
-                "training_args": training_args,
                 "data_args": data_args,
+                "model_args": model_args,
             },
         )
 
@@ -157,6 +151,14 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
+
+    # wandb 설정
+    wandb.init(
+        project=model_args.wandb_project,
+        name=model_args.wandb_name,
+        dir=training_args.output_dir
+    )
+
     # Training
     if training_args.do_train:
         if last_checkpoint is not None:
