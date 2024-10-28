@@ -13,3 +13,5 @@ wandb/
 install/
 ensemble_outputs/
 predictions_for_ensemble/
+*.bak
+*.pkl

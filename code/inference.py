@@ -75,6 +75,8 @@ def main():
             datasets,
             training_args,
             data_args,
+            model_args.data_path,
+            model_args.context_path,
         )
 
     # eval or predict mrc model
@@ -109,6 +111,7 @@ def run_sparse_retrieval(
         df = retriever.retrieve(datasets["validation"], topk=data_args.top_k_retrieval)
 
     # test data 에 대해선 정답이 없으므로 id question context 로만 데이터셋이 구성됩니다.
+    f = None
     if training_args.do_predict:
         f = Features(
             {

@@ -28,7 +28,19 @@ class ModelArguments:
     )
     data_path: Optional[str] = field(
         default="../data",
-        metadata={"help": ""},
+        metadata={"help": "A path where .bin files are located/stored at"},
+    )
+    context_path: Optional[str] = field(
+        default="wikipedia_documents.json",
+        metadata={
+            "help": "Filename that contain passages for training under data_path"
+        },
+    )
+    return_token_type_ids: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "True if you are using BERT based model, False if you are using RoBERTa based model"
+        },
     )
 
 
