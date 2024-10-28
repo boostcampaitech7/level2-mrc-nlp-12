@@ -3,7 +3,6 @@ import json
 import os
 import pickle
 import random
-import re
 import time
 from contextlib import contextmanager
 from typing import List, NoReturn, Optional, Tuple, Union
@@ -16,10 +15,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset, concatenate_datasets, load_from_disk
-from elasticsearch import Elasticsearch
 from kiwipiepy import Kiwi
-from konlpy.tag import Okt
-from rank_bm25 import BM25Okapi
+from sklearn.feature_extraction.text import TfidfVectorizer
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -28,13 +25,22 @@ from transformers import (
     AutoModel,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
+    set_seed,
 )
 
-from pororo import Pororo
+try:
+    from elasticsearch import Elasticsearch
 
-seed = 2024
-random.seed(seed)  # python random seed 고정
-np.random.seed(seed)  # numpy random seed 고정
+    elasticsearch_installed = True
+except ImportError:
+    elasticsearch_installed = False
+
+try:
+    from pororo import Pororo
+
+    pororo_installed = True
+except ImportError:
+    pororo_installed = False
 
 
 @contextmanager
@@ -48,12 +54,8 @@ class SparseRetrieval:
     def __init__(
         self,
         tokenize_fn,
-        q_tokenize_fn,
         data_path: Optional[str] = "../data/",
-        context_path: Optional[str] = "wikipedia_documents.json",
-        index_file: Optional[str] = "bm25_index.pkl",
-        es: Elasticsearch = None,
-        INDEX: str = "",
+        context_path: Optional[str] = "wikipedia_documents_combined.json",
     ) -> NoReturn:
         """
         Arguments:
@@ -68,77 +70,63 @@ class SparseRetrieval:
                 데이터가 보관되어 있는 경로입니다.
 
             context_path:
-                Passage들이 묶여있는 파일을 포함하는 경로명입니다.
+                Passage들이 묶여있는 파일명입니다.
 
-            context_path가 존재해야합니다.
+            data_path/context_path가 존재해야합니다.
 
         Summary:
             Passage 파일을 불러오고 TfidfVectorizer를 선언하는 기능을 합니다.
         """
-        self.tokenize_fn = tokenize_fn
-        self.q_tokenize_fn = q_tokenize_fn
-        self.data_path = data_path
-        self.index_file = index_file
 
-        with open(os.path.join(data_path, context_path), "r", encoding="utf-8") as f:
+        self.data_path = data_path
+        with open(context_path, "r", encoding="utf-8") as f:
             wiki = json.load(f)
 
         self.contexts = list(
-            {
-                tuple(sorted(d.items()))
-                for d in [
-                    {"id": v["document_id"], "title": v["title"], "content": v["text"]}
-                    for v in wiki.values()
-                ]
-            }
+            dict.fromkeys([v["text"] for v in wiki.values()])
+        )  # set 은 매번 순서가 바뀌므로
+        print(f"Lengths of unique contexts : {len(self.contexts)}")
+        self.ids = list(range(len(self.contexts)))
+
+        # Transform by vectorizer
+        self.tfidfv = TfidfVectorizer(
+            tokenizer=tokenize_fn,
+            ngram_range=(1, 2),
+            max_features=50000,
         )
 
-        # 저장된 인덱스 파일이 있으면 로드, 없으면 새로 생성
-        # if os.path.isfile(self.index_file):
-        #     print("Loading BM25 index from pickle file...")
-        #     with open(self.index_file, "rb") as f:
-        #         self.BM25 = pickle.load(f)
-        # else:
-        #     print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
-        #     self.tokenized_contexts = [tokenize_fn(context) for context in tqdm(self.contexts)]
-        #     print("Tokenized Contexts Head: ", self.tokenized_contexts[:5])
+        self.p_embedding = None  # get_sparse_embedding()로 생성합니다
+        self.indexer = None  # build_faiss()로 생성합니다.
 
-        #     # self.BM25 = BM25Okapi(self.tokenized_contexts, k1=1.2, b=0.75)
-        #     with open(self.index_file, "wb") as f:
-        #         pickle.dump(self.BM25, f)
-        #     print("BM25 index saved to pickle.")
+    def get_sparse_embedding(self) -> NoReturn:
+        """
+        Summary:
+            Passage Embedding을 만들고
+            TFIDF와 Embedding을 pickle로 저장합니다.
+            만약 미리 저장된 파일이 있으면 저장된 pickle을 불러옵니다.
+        """
 
-        # Elasticsearch의 BM25Retrieval을 사용
-        MAX_LENGTH = 512
+        # Pickle을 저장합니다.
+        pickle_name = f"sparse_embedding.bin"
+        tfidfv_name = f"tfidv.bin"
+        emd_path = os.path.join(self.data_path, pickle_name)
+        tfidfv_path = os.path.join(self.data_path, tfidfv_name)
 
-        # 긴 지문을 일정한 길이로 분할하는 함수
-        def split_long_content(content, max_length=MAX_LENGTH):
-            return [
-                content[i : i + max_length] for i in range(0, len(content), max_length)
-            ]
-
-        print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
-
-        # Pororo NER 태스크 불러오기
-        ner = Pororo(task="ner", lang="ko")
-
-        for doc in tqdm(self.contexts, desc="Make BM25: "):
-            content_splits = split_long_content(doc[0])
-            for i, content in enumerate(content_splits):
-                ner_result = ner(content)
-                named_entities = " ".join(
-                    [entity[0] for entity in ner_result if entity[1] != "O"]
-                )  # 'O'는 개체명이 아닌 일반 단어
-                augmented_content = (
-                    f"{named_entities} {content}" if named_entities else content
-                )
-                doc_dict = {
-                    "id": f"{str(doc[1])}_{i}",  # 각 분할된 지문에 고유 ID 부여
-                    "title": doc[2],
-                    "content": augmented_content,
-                }
-                # es.indices.delete(index=INDEX, id=doc[1])
-                es.index(index=INDEX, id=doc_dict["id"], body=doc_dict)
+        if os.path.isfile(emd_path) and os.path.isfile(tfidfv_path):
+            with open(emd_path, "rb") as file:
+                self.p_embedding = pickle.load(file)
+            with open(tfidfv_path, "rb") as file:
+                self.tfidfv = pickle.load(file)
+            print("Embedding pickle load.")
+        else:
+            print("Build passage embedding")
+            self.p_embedding = self.tfidfv.fit_transform(self.contexts)
+            print(self.p_embedding.shape)
+            with open(emd_path, "wb") as file:
+                pickle.dump(self.p_embedding, file)
+            with open(tfidfv_path, "wb") as file:
+                pickle.dump(self.tfidfv, file)
+            print("Embedding pickle saved.")
 
     def build_faiss(self, num_clusters=64) -> NoReturn:
         """
@@ -176,122 +164,66 @@ class SparseRetrieval:
             faiss.write_index(self.indexer, indexer_path)
             print("Faiss Indexer Saved.")
 
-    def retrieve_es(
-        self,
-        query_or_dataset: Union[str, Dataset],
-        topk: Optional[int] = 10,
-        es: Elasticsearch = None,
-        INDEX: str = "",
-    ):
-        if isinstance(query_or_dataset, str):
-            query = {"size": topk, "query": {"match": {"content": query_or_dataset}}}
-            response = es.search(index=INDEX, body=query)
-            print("[Search query]\n", query_or_dataset, "\n")
-
-            # Elasticsearch의 검색 결과를 처리
-            doc_scores = []
-            topk_indices = []
-
-            # 결과 출력 및 점수 수집
-            for hit in response["hits"]["hits"]:
-                doc_scores.append(
-                    hit["_score"]
-                )  # Elasticsearch의 _score 값을 점수로 사용
-                topk_indices.append(hit["_id"])  # 문서의 ID를 topk 인덱스처럼 사용
-
-                # 결과 출력 (선택적으로 주석 해제하여 사용)
-                print(f"Passage ID: {hit['_id']} with score {hit['_score']:.4f}")
-                print(f"Content: {hit['_source']['content']}\n")
-
-        elif isinstance(query_or_dataset, Dataset):
-            # 여러 쿼리 처리
-            total = []
-            for idx, example in enumerate(
-                tqdm(query_or_dataset, desc="BM25 retrieval")
-            ):
-                query = example["question"]
-
-                # Elasticsearch 쿼리 작성
-                es_query = {
-                    "size": topk,  # topk 설정
-                    "query": {
-                        "match": {"content": query}  # question에 해당하는 내용으로 검색
-                    },
-                }
-
-                # Elasticsearch 검색 실행
-                response = es.search(index=INDEX, body=es_query)
-
-                # 결과 정리
-                topk_contexts = []
-                for hit in response["hits"]["hits"]:
-                    content = hit["_source"]["content"]
-                    # content가 리스트라면 이를 문자열로 변환
-                    topk_contexts.append(content[1])
-
-                # 현재 쿼리의 결과 저장
-                tmp = {
-                    "question": query,
-                    "id": query_or_dataset["id"][idx],
-                    "context": " ".join(topk_contexts),  # 검색된 상위 컨텍스트들을 합침
-                }
-
-                # 만약 answers 키가 있으면 답변도 포함
-                if "answers" in example.keys():
-                    tmp["answers"] = example["answers"]
-
-                total.append(tmp)
-
-            # 결과를 데이터프레임으로 변환하여 반환
-            cqas = pd.DataFrame(total)
-            return cqas
-
     def retrieve(
-        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
-    ) -> Union[Tuple[List[float], List[int]], pd.DataFrame]:
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
+    ) -> Union[Tuple[List, List], pd.DataFrame]:
         """
         Arguments:
-            query_or_dataset: Query를 받습니다. (문자열 또는 Dataset)
-            topk: 상위 몇 개의 passage를 사용할지 지정합니다.
+            query_or_dataset (Union[str, Dataset]):
+                str이나 Dataset으로 이루어진 Query를 받습니다.
+                str 형태인 하나의 query만 받으면 `get_relevant_doc`을 통해 유사도를 구합니다.
+                Dataset 형태는 query를 포함한 HF.Dataset을 받습니다.
+                이 경우 `get_relevant_doc_bulk`를 통해 유사도를 구합니다.
+            topk (Optional[int], optional): Defaults to 1.
+                상위 몇 개의 passage를 사용할 것인지 지정합니다.
 
         Returns:
-            단일 Query의 경우 상위 passage들을 반환합니다.
-            다수의 Query의 경우 DataFrame으로 반환합니다.
+            1개의 Query를 받는 경우  -> Tuple(List, List)
+            다수의 Query를 받는 경우 -> pd.DataFrame: [description]
+
+        Note:
+            다수의 Query를 받는 경우,
+                Ground Truth가 있는 Query (train/valid) -> 기존 Ground Truth Passage를 같이 반환합니다.
+                Ground Truth가 없는 Query (test) -> Retrieval한 Passage만 반환합니다.
         """
 
+        assert (
+            self.p_embedding is not None
+        ), "get_sparse_embedding() 메소드를 먼저 수행해줘야합니다."
+
         if isinstance(query_or_dataset, str):
-            # 단일 쿼리 처리
-            tokenized_query = self.q_tokenize_fn(query_or_dataset)
-            doc_scores = self.BM25.get_scores(tokenized_query)
-            topk_indices = np.argsort(doc_scores)[::-1][:topk]
+            doc_scores, doc_indices = self.get_relevant_doc(query_or_dataset, k=topk)
             print("[Search query]\n", query_or_dataset, "\n")
 
-            # for i in range(topk):
-            #     print(f"Top-{i+1} passage with score {doc_scores[topk_indices[i]]:.4f}")
-            #     print(self.contexts[topk_indices[i]])
+            for i in range(topk):
+                print(f"Top-{i+1} passage with score {doc_scores[i]:4f}")
+                print(self.contexts[doc_indices[i]])
 
-            return doc_scores[topk_indices].tolist(), topk_indices.tolist()
+            return (doc_scores, [self.contexts[doc_indices[i]] for i in range(topk)])
 
         elif isinstance(query_or_dataset, Dataset):
-            # 여러 쿼리 처리
+
+            # Retrieve한 Passage를 pd.DataFrame으로 반환합니다.
             total = []
-
-            # 이거 나중에 에러 없는 경우에는 queries[:50] -> queries로 변경하기
+            with timer("query exhaustive search"):
+                doc_scores, doc_indices = self.get_relevant_doc_bulk(
+                    query_or_dataset["question"], k=topk
+                )
             for idx, example in enumerate(
-                tqdm(query_or_dataset, desc="BM25 retrieval")
+                tqdm(query_or_dataset, desc="Sparse retrieval: ")
             ):
-                query = example["question"]
-                tokenized_query = self.q_tokenize_fn(query)
-                doc_scores = self.BM25.get_scores(tokenized_query)
-                topk_indices = np.argsort(doc_scores)[::-1][:topk]
-
                 tmp = {
-                    "question": query,
-                    "id": query_or_dataset["id"][idx],
-                    "context": " ".join([self.contexts[i] for i in topk_indices]),
+                    # Query와 해당 id를 반환합니다.
+                    "question": example["question"],
+                    "id": example["id"],
+                    # Retrieve한 Passage의 id, context를 반환합니다.
+                    "context": " ".join(
+                        [self.contexts[pid] for pid in doc_indices[idx]]
+                    ),
                 }
-
-                if "answers" in example.keys():
+                if "context" in example.keys() and "answers" in example.keys():
+                    # validation 데이터를 사용하면 ground_truth context와 answer도 반환합니다.
+                    tmp["original_context"] = example["context"]
                     tmp["answers"] = example["answers"]
                 total.append(tmp)
 
@@ -386,9 +318,9 @@ class SparseRetrieval:
             )
             print("[Search query]\n", query_or_dataset, "\n")
 
-            # for i in range(topk):
-            #     print("Top-%d passage with score %.4f" % (i + 1, doc_scores[i]))
-            #     print(self.contexts[doc_indices[i]])
+            for i in range(topk):
+                print("Top-%d passage with score %.4f" % (i + 1, doc_scores[i]))
+                print(self.contexts[doc_indices[i]])
 
             return (doc_scores, [self.contexts[doc_indices[i]] for i in range(topk)])
 
@@ -468,6 +400,183 @@ class SparseRetrieval:
         D, I = self.indexer.search(q_embs, k)
 
         return D.tolist(), I.tolist()
+
+
+class SparseRetrieval_ElasticSearch(SparseRetrieval):
+    def __init__(
+        self,
+        tokenize_fn,
+        q_tokenize_fn,
+        data_path: Optional[str] = "../data/",
+        context_path: Optional[str] = "wikipedia_documents.json",
+        index_file: Optional[str] = "bm25_index.pkl",
+        es=None,
+        index_es: str = "",
+    ) -> NoReturn:
+        """
+        Initialization for Elasticsearch-based retrieval.
+        """
+        if not elasticsearch_installed or not pororo_installed:
+            raise ImportError(
+                "Elasticsearch is not installed. Please install it to use Elasticsearch-based retrieval."
+            )
+        super().__init__(tokenize_fn, data_path, context_path)
+        self.q_tokenize_fn = q_tokenize_fn
+        self.index_file = index_file
+        self.index_es = index_es
+
+        self.es = es if es is not None else Elasticsearch("http://localhost:9200")
+
+        # Load or create index
+        if not self.es.indices.exists(index=self.index_es):
+            self.build_index()
+
+    def build_index(self) -> NoReturn:
+        """
+        Build the Elasticsearch index with BM25 retrieval settings.
+        """
+        from pororo import Pororo
+
+        MAX_LENGTH = 512
+
+        def split_long_content(content, max_length=MAX_LENGTH):
+            return [
+                content[i : i + max_length] for i in range(0, len(content), max_length)
+            ]
+
+        print(f"Tokenizing {len(self.contexts)} contexts for BM25...")
+
+        ner = Pororo(task="ner", lang="ko")
+
+        for doc in tqdm(self.contexts, desc="Building Elasticsearch index"):
+            content_splits = split_long_content(doc[0])
+            for i, content in enumerate(content_splits):
+                ner_result = ner(content)
+                named_entities = " ".join(
+                    [entity[0] for entity in ner_result if entity[1] != "O"]
+                )
+                augmented_content = (
+                    f"{named_entities} {content}" if named_entities else content
+                )
+                doc_dict = {
+                    "id": f"{doc[1]}_{i}",
+                    "title": doc[2],
+                    "content": augmented_content,
+                }
+                self.es.index(index=self.index, id=doc_dict["id"], body=doc_dict)
+
+    def build_index(self, num_clusters=64) -> NoReturn:
+        """
+        Summary:
+            속성으로 저장되어 있는 Passage Embedding을
+            Faiss indexer에 fitting 시켜놓습니다.
+            이렇게 저장된 indexer는 `get_relevant_doc`에서 유사도를 계산하는데 사용됩니다.
+
+        Note:
+            Faiss는 Build하는데 시간이 오래 걸리기 때문에,
+            매번 새롭게 build하는 것은 비효율적입니다.
+            그렇기 때문에 build된 index 파일을 저정하고 다음에 사용할 때 불러옵니다.
+            다만 이 index 파일은 용량이 1.4Gb+ 이기 때문에 여러 num_clusters로 시험해보고
+            제일 적절한 것을 제외하고 모두 삭제하는 것을 권장합니다.
+        """
+
+        indexer_name = f"faiss_clusters{num_clusters}.index"
+        indexer_path = os.path.join(self.data_path, indexer_name)
+        if os.path.isfile(indexer_path):
+            print("Load Saved Faiss Indexer.")
+            self.indexer = faiss.read_index(indexer_path)
+
+        else:
+            p_emb = self.p_embedding.astype(np.float32).toarray()
+            emb_dim = p_emb.shape[-1]
+
+            num_clusters = num_clusters
+            quantizer = faiss.IndexFlatL2(emb_dim)
+
+            self.indexer = faiss.IndexIVFScalarQuantizer(
+                quantizer, quantizer.d, num_clusters, faiss.METRIC_L2
+            )
+            self.indexer.train(p_emb)
+            self.indexer.add(p_emb)
+            faiss.write_index(self.indexer, indexer_path)
+            print("Faiss Indexer Saved.")
+
+    def retrieve_es(
+        self,
+        query_or_dataset: Union[str, Dataset],
+        topk: Optional[int] = 10,
+    ) -> Union[Tuple[List[float], List[str]], pd.DataFrame]:
+        """
+        Retrieve documents using Elasticsearch.
+        """
+        if isinstance(query_or_dataset, str):
+            return self._retrieve_single(query_or_dataset, topk)
+        elif isinstance(query_or_dataset, Dataset):
+            return self._retrieve_bulk(query_or_dataset, topk)
+
+    def _retrieve_single(self, query: str, topk: int) -> Tuple[List[float], List[str]]:
+        """
+        Retrieve documents for a single query.
+        """
+        es_query = {"size": topk, "query": {"match": {"content": query}}}
+        response = self.es.search(index=self.index_es, body=es_query)
+
+        doc_scores = [hit["_score"] for hit in response["hits"]["hits"]]
+        topk_ids = [hit["_id"] for hit in response["hits"]["hits"]]
+        return doc_scores, topk_ids
+
+    def _retrieve_bulk(self, dataset: Dataset, topk: int) -> pd.DataFrame:
+        """
+        Retrieve documents for multiple queries.
+        """
+        results = []
+        for idx, example in enumerate(tqdm(dataset, desc="BM25 retrieval")):
+            query = example["question"]
+            es_query = {"size": topk, "query": {"match": {"content": query}}}
+            response = self.es.search(index=self.index_es, body=es_query)
+
+            topk_contexts = [
+                hit["_source"]["content"] for hit in response["hits"]["hits"]
+            ]
+            result = {
+                "question": query,
+                "id": example["id"],
+                "context": " ".join(topk_contexts),
+            }
+            if "answers" in example:
+                result["answers"] = example["answers"]
+            results.append(result)
+
+        return pd.DataFrame(results)
+
+    def retrieve(
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 10
+    ) -> Union[Tuple[List[float], List[int]], pd.DataFrame]:
+        """
+        Override the base class retrieve method to use Elasticsearch.
+        """
+        return self.retrieve_es(query_or_dataset, topk)
+
+    # Placeholder methods for inheriting the rest of the functionalities
+    def build_faiss(self, num_clusters=64) -> NoReturn:
+        raise NotImplementedError(
+            "FAISS support not implemented for Elasticsearch-based retrieval."
+        )
+
+    def get_relevant_doc(self, query: str, k: Optional[int] = 1) -> Tuple[List, List]:
+        raise NotImplementedError("Use retrieve_es for Elasticsearch-based retrieval.")
+
+    def get_relevant_doc_bulk(
+        self, queries: List, k: Optional[int] = 1
+    ) -> Tuple[List, List]:
+        raise NotImplementedError("Use retrieve_es for Elasticsearch-based retrieval.")
+
+    def retrieve_faiss(
+        self, query_or_dataset: Union[str, Dataset], topk: Optional[int] = 1
+    ) -> Union[Tuple[List, List], pd.DataFrame]:
+        raise NotImplementedError(
+            "FAISS support not implemented for Elasticsearch-based retrieval."
+        )
 
 
 # Poly Encoder를 이용해서 DenseRetrieval 클래스를 구현
@@ -590,7 +699,7 @@ class PolyEncoder(nn.Module):
             return query_emb, context_emb, scores
 
 
-class DenseRetrievalPolyEncoder(torch.nn.Module):
+class DenseRetrievalPolyEncoder(nn.Module):
     def __init__(
         self,
         model_name_or_path,
@@ -1001,94 +1110,6 @@ class DenseRetrievalPolyEncoder(torch.nn.Module):
         )
 
 
-# Dense 관련 코드
-# if __name__ == "__main__":
-#     parser = argparse.ArgumentParser(description="Poly Encoder-based Dense Retrieval")
-#     parser.add_argument(
-#         "--dataset_name", metavar="./data/train_dataset", type=str, help="Dataset path", default="../data/train_dataset"
-#     )
-#     parser.add_argument(
-#         "--model_name_or_path",
-#         metavar="klue/bert-base",
-#         type=str,
-#         help="Model name or path for PolyEncoder",
-#         default="klue/bert-base",
-#     )
-#     parser.add_argument("--data_path", metavar="./data", type=str, help="Path to data", default="../data")
-#     parser.add_argument(
-#         "--context_path", metavar="wikipedia_documents", type=str, help="Path to contexts (wikipedia data)", default="wikipedia_documents.json"
-#     )
-#     parser.add_argument("--use_faiss", metavar=True, type=bool, help="Use FAISS for retrieval", default=False)
-
-#     args = parser.parse_args()
-
-#     # Test dataset load
-#     org_dataset = load_from_disk(args.dataset_name)
-#     full_ds = concatenate_datasets(
-#         [
-#             org_dataset["train"].flatten_indices(),
-#             org_dataset["validation"].flatten_indices(),
-#         ]
-#     )
-#     print("*" * 40, "query dataset", "*" * 40)
-#     torch.cuda.empty_cache()
-#     # Initialize PolyEncoder-based Dense Retrieval
-#     retriever = DenseRetrievalPolyEncoder(
-#         model_name_or_path=args.model_name_or_path,
-#         data_path=args.data_path,
-#         context_path=args.context_path,
-#         poly_m=64,  # You can adjust this value based on your needs
-#         device="cuda" if torch.cuda.is_available() else "cpu"
-#     )
-
-#     query = "대통령을 포함한 미국의 행정부 견제권을 갖는 국가 기관은?"
-
-#     if args.use_faiss:
-#         # FAISS-based retrieval
-#         with timer("single query by faiss"):
-#             scores, indices = retriever.retrieve_faiss(query)
-
-#         # Bulk query processing
-#         with timer("single query by faiss"):
-#             scores, indices = retriever.retrieve_faiss(query)
-#             print(f"Top results for query: {query}")
-#     else:
-#         # Single query evaluation
-#         with timer("single query by exhaustive search"):
-#             if os.path.exists("cached_context_embeddings.pt"):
-#                 print("캐시된 문맥 임베딩을 불러옵니다.")
-#                 retriever.load_cached_context_embeddings()
-#             else:
-#                 print("문맥 임베딩을 계산하고 캐싱합니다.")
-#                 retriever.cache_context_embeddings()
-
-#             result = retriever.retrieve(query)
-#             print(result)
-
-#     #    Exhaustive DPR Search using PolyEncoder
-#         with timer("bulk query by exhaustive search"):
-#             def show_differences(str1, str2):
-#                 print("Original Context:\n", repr(str1))
-#                 print("Corrected Context:\n", repr(str2))
-#                 if str1 != str2:
-#                     for i, (a, b) in enumerate(zip(str1, str2)):
-#                         if a != b:
-#                             print(f"Difference at index {i}: '{a}' != '{b}'")
-
-#             # PolyEncoder-based retrieval for multiple queries
-#             df = retriever.retrieve(full_ds, topk=40, query_batch_size=4)
-#             print(df)
-
-#             # 데이터프레임의 열 목록을 출력
-#             print("df columns: ", df.columns)
-
-#             if df is not None and "original_context" in df.columns and "first_context" in df.columns:
-#                 df["correct"] = df["original_context"] == df["first_context"]
-#                 print("correct retrieval result by exhaustive search", df["correct"].sum() / len(df))
-#             else:
-#                 print("Error: DataFrame doesn't contain required columns")
-
-# BM25 관련 코드
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(

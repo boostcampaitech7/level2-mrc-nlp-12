@@ -28,7 +28,9 @@ class ModelArguments:
     )
     data_path: Optional[str] = field(
         default="../models",
-        metadata={"help": "A path where .bin files are located/stored at. Recommmeded to use train directory"},
+        metadata={
+            "help": "A path where .bin files are located/stored at. Recommmeded to use train directory"
+        },
     )
     context_path: Optional[str] = field(
         default="../data/wikipedia_documents.json",
@@ -36,47 +38,29 @@ class ModelArguments:
             "help": "Filename that contain passages for training under data_path"
         },
     )
-    return_token_type_ids: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "True if you are using BERT based model, False if you are using RoBERTa based model"
-        },
-    )
     use_kiwi: bool = field(
         default=False,
-        metadata={
-            "help": "True if you know what you are doing"
-        },
+        metadata={"help": "True if you know what you are doing"},
     )
     use_okt: bool = field(
         default=False,
-        metadata={
-            "help": "True if you know what you are doing"
-        },
+        metadata={"help": "True if you know what you are doing"},
     )
     use_nori: bool = field(
         default=False,
-        metadata={
-            "help": "True if you know what you are doing"
-        },
+        metadata={"help": "True if you know what you are doing"},
     )
     use_stopwords: bool = field(
         default=False,
-        metadata={
-            "help": "True if you know what you are doing"
-        },
+        metadata={"help": "True if you know what you are doing"},
     )
     wandb_project: str = field(
         default="mrc",
-        metadata={
-            "help": "Change only if you know what you are doing"
-        },
+        metadata={"help": "Change only if you know what you are doing"},
     )
     wandb_name: str = field(
         default="",
-        metadata={
-            "help": "Name that show up in wandb project"
-        },
+        metadata={"help": "Name that show up in wandb project"},
     )
 
 

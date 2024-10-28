@@ -10,14 +10,8 @@ import wandb
 from arguments import DataTrainingArguments, ModelArguments
 from custom_logger import CustomLogger
 from datasets import DatasetDict, load_from_disk, load_metric
-from trainer_qa import (
-    QuestionAnsweringTrainer,
-)
-from transformers import (
-    EvalPrediction,
-    TrainingArguments,
-    set_seed,
-)
+from trainer_qa import QuestionAnsweringTrainer
+from transformers import EvalPrediction, TrainingArguments, set_seed
 from utils import (
     check_git_status,
     create_experiment_dir,
@@ -42,7 +36,9 @@ def main():
     commit_id = check_git_status()
     experiment_dir = create_experiment_dir(experiment_type="train")
 
-    model_args, data_args, training_args, json_args = get_arguments(experiment_dir)
+    model_args, data_args, training_args, json_args = get_arguments(
+        experiment_dir, experiment_type="train"
+    )
     logger.set_config()
     logger.set_training_args(training_args=training_args)
 
@@ -108,7 +104,6 @@ def run_mrc(
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
                 "data_args": data_args,
-                "model_args": model_args,
             },
         )
     if training_args.do_eval:
@@ -127,7 +122,6 @@ def run_mrc(
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
                 "data_args": data_args,
-                "model_args": model_args,
             },
         )
 
@@ -153,11 +147,8 @@ def run_mrc(
     )
 
     # wandb 설정
-    wandb.init(
-        project=model_args.wandb_project,
-        name=model_args.wandb_name,
-        dir=training_args.output_dir
-    )
+    wandb.init(project=model_args.wandb_project, dir=training_args.output_dir)
+    wandb.run.name = model_args.wandb_name
 
     # Training
     if training_args.do_train:

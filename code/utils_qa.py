@@ -366,7 +366,7 @@ def check_no_error(
 
 
 def prepare_train_features(
-    examples, tokenizer, column_names, max_seq_length, data_args, model_args
+    examples, tokenizer, column_names, max_seq_length, data_args
 ):
     question_column_name = "question" if "question" in column_names else column_names[0]
     context_column_name = "context" if "context" in column_names else column_names[1]
@@ -386,7 +386,6 @@ def prepare_train_features(
         stride=data_args.doc_stride,
         return_overflowing_tokens=True,
         return_offsets_mapping=True,
-        return_token_type_ids=model_args.return_token_type_ids,
         padding="max_length" if data_args.pad_to_max_length else False,
     )
 
@@ -455,7 +454,7 @@ def prepare_train_features(
 
 # Validation preprocessing
 def prepare_validation_features(
-    examples, tokenizer, column_names, max_seq_length, data_args, model_args
+    examples, tokenizer, column_names, max_seq_length, data_args
 ):
 
     question_column_name = "question" if "question" in column_names else column_names[0]
@@ -476,7 +475,6 @@ def prepare_validation_features(
         stride=data_args.doc_stride,
         return_overflowing_tokens=True,
         return_offsets_mapping=True,
-        return_token_type_ids=model_args.return_token_type_ids,
         padding="max_length" if data_args.pad_to_max_length else False,
     )
 
