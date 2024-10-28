@@ -64,61 +64,65 @@ EM 기준으로 리더보드 등수가 반영되고, F1은 참고용으로만 �
   - 타 참가자와 토론이 아닌 단순 솔루션을 캐내는 행위
 
 
+## 파일 구성
+
+### 저장소 구조
+
+```
+level2-mrc-nlp-12
+├─ .gitignore
+├─ .pre-commit-config.yaml
+├─ README.md
+├─ assets
+│  ├─ dataset.png
+│  └─ utils_qa.py
+├─ data
+│  ├─ test_dataset
+│  │  ├─ dataset_dict.json
+│  │  └─ validation
+│  │     ├─ dataset_info.json
+│  │     ├─ dataset.arrow
+│  │     └─ state.json
+│  ├─ train_dataset
+│  │  ├─ dataset_dict.json
+│  │  ├─ train
+│  │  │  ├─ dataset_info.json
+│  │  │  ├─ dataset.arrow
+│  │  │  └─ state.json
+│  │  └─ validation
+│  │     ├─ dataset_info.json
+│  │     ├─ dataset.arrow
+│  │     └─ state.json
+├─ code
+│  ├─ arguments.py
+│  ├─ custom_logger.py
+│  ├─ ensemble.py
+│  ├─ inference.py
+│  ├─ requirements.txt
+│  ├─ retrieval.py
+│  ├─ train.py
+│  ├─ trainer_qa.py
+│  ├─ utils.py
+│  └─ utils_qa.py
+├─ pyproject.toml
+└─ scripts
+   ├─ eda.ipynb
+   ├─ pororo.ipynb
+   ├─ question_generation.py
+   ├─ wikipedia_preprocessing_ADEA.ipynb
+   └─ wikipedia_unique.py
+```
+
 ## 설치 방법
 
 ### 요구 사항
 
-```
-# data (51.2 MB)
-tar -xzf data.tar.gz
-
-# 필요한 파이썬 패키지 설치.
+```bash
+git clone <repository>
+cd <repository>
 pip install -r code/requirements.txt
 ```
 
-## pre-commit hooks 설정
-
-- commit 할 때마다 `.pre-commit-config.yaml`에 정의한 행동을 실행
-- [black](https://github.com/psf/black), [isort](https://github.com/pycqa/isort) 및 [pre-defined hooks by Github](https://github.com/pre-commit/pre-commit-hooks)의 몇 가지 hooks를 사용하고 있음
-
-### 요구사항
-
-- `pre-commit` 설치
-
-```zsh
-% pre-commit --version
-pre-commit 4.0.1
-```
-
-### 설정
-
-```zsh
-% pre-commit install
-```
-
-### Troubleshoot
-- pre-commit이 실행되지 않을 경우
-```zsh
-% pre-commit clean && pre-commit install && pre-commit run --all-files
-```
-
-## 파일 구성
-
-
-### 저장소 구조
-
-```bash
-./assets/                # readme 에 필요한 이미지 저장
-./data/                  # 전체 데이터. 아래 상세 설명
-requirements.txt         # 요구사항 설치 파일
-retrieval.py             # sparse retreiver 모듈 제공
-arguments.py             # 실행되는 모든 argument가 dataclass 의 형태로 저장되어있음
-trainer_qa.py            # MRC 모델 학습에 필요한 trainer 제공.
-utils_qa.py              # 기타 유틸 함수 제공
-
-train.py                 # MRC, Retrieval 모델 학습 및 평가
-inference.py		     # ODQA 모델 평가 또는 제출 파일 (predictions.json) 생성
-```
 
 ## 데이터 소개
 
@@ -139,59 +143,76 @@ data에 대한 argument 는 `arguments.py` 의 `DataTrainingArguments` 에서 �
 
 # 훈련, 평가, 추론
 
-### train
+## train
+
+실행결과는 `experiments/` 아래에 실행일시 및 파일명을 기준으로 디렉토리를 생성해 저장하고 있습니다.
+
+이 때 arguments는 `args.json` 파일을 통해 입력할 수 있으며 실행 커맨드에서 직접 입력할 수도 있습니다. 같은 argument를 설정할 경우, cli 상의 입력이 우선시됩니다. 
 
 만약 arguments 에 대한 세팅을 직접하고 싶다면 `arguments.py` 를 참고해주세요.
 
-roberta 모델을 사용할 경우 tokenizer 사용시 아래 함수의 옵션을 수정해야합니다.
-베이스라인은 klue/bert-base로 진행되니 이 부분의 주석을 해제하여 사용해주세요 !
-tokenizer는 train, validation (train.py), test(inference.py) 전처리를 위해 호출되어 사용됩니다.
-(tokenizer의 return_token_type_ids=False로 설정해주어야 함)
 
-```python
-# train.py
-def prepare_train_features(examples):
-        # truncation과 padding(length가 짧을때만)을 통해 toknization을 진행하며, stride를 이용하여 overflow를 유지합니다.
-        # 각 example들은 이전의 context와 조금씩 겹치게됩니다.
-        tokenized_examples = tokenizer(
-            examples[question_column_name if pad_on_right else context_column_name],
-            examples[context_column_name if pad_on_right else question_column_name],
-            truncation="only_second" if pad_on_right else "only_first",
-            max_length=max_seq_length,
-            stride=data_args.doc_stride,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=True,
-            # return_token_type_ids=False, # roberta모델을 사용할 경우 False, bert를 사용할 경우 True로 표기해야합니다.
-            padding="max_length" if data_args.pad_to_max_length else False,
-        )
+```bash
+# 학습 예시 (args.json 사용)
+python train.py
 ```
-
+```json
+// args.json
+{
+  "do_train": true
+}
+```
+또는 아래와 같이 실행할 수 있습니다.
 ```bash
 # 학습 예시 (train_dataset 사용)
 python train.py --output_dir ./models/train_dataset --do_train
-```
+``` 
 
-### eval
+## eval
 
 MRC 모델의 평가는(`--do_eval`) 따로 설정해야 합니다.  위 학습 예시에 단순히 `--do_eval` 을 추가로 입력해서 훈련 및 평가를 동시에 진행할 수도 있습니다.
 
 ```bash
-# mrc 모델 평가 (train_dataset 사용)
-python train.py --output_dir ./outputs/train_dataset --model_name_or_path ./models/train_dataset/ --do_eval
+# 학습 예시 (args.json 사용)
+python train.py
+```
+```json
+// args.json
+{
+  "do_train": true,
+  "do_eval": true
+}
 ```
 
-### inference
+## inference
 
-retrieval 과 mrc 모델의 학습이 완료되면 `inference.py` 를 이용해 odqa 를 진행할 수 있습니다.
+retrieval 과 mrc 모델의 학습이 완료되면 `inference.py` 를 이용해 odqa 를 진행할 수 있습니다. train의 `args.json`과 마찬가지로 argument를 별도의 파일 `args_inference.py`로 입력할 수 있습니다.
 
-* 학습한 모델의  test_dataset에 대한 결과를 제출하기 위해선 추론(`--do_predict`)만 진행하면 됩니다.
+* 학습한 모델의 test_dataset에 대한 결과를 제출하기 위해선 추론(`--do_predict`)만 진행하면 됩니다.
 
 * 학습한 모델이 train_dataset 대해서 ODQA 성능이 어떻게 나오는지 알고 싶다면 평가(`--do_eval`)를 진행하면 됩니다.
 
+* 둘을 동시에 진행할 경우 eval이 정상적으로 마쳐지지 않는 오류가 발생하니 아직은 동시에 진행하지 않아야 합니다.
+
+* 학습에 사용할 mrc 모델의 경로를 `model_name_or_path`로 지정해야 하며, retrieval 모델의 경로는 `data_path`로 지정해야 합니다. `data_path`에 retrieval 모델의 bin 파일이 없을 경우에는 해당 경로에 retrieval 파일을 저장합니다. 따라서 `model_name_or_path`와 `data_path`를 통일하는 것을 권장합니다.
+
+* `context_path`는 retrieval에 사용할 passages 파일의 파일명을 포함한 경로를 입력합니다.
+
+* `dataset_name`은 `--do_predict`인 경우 `../data/test_dataset`을, `--do_eval`인 경우 `../data/train_dataset`을 사용하는 것을 기본으로 합니다. `--do_eval`에 `dataset_name`을 명시하지 않을 경우 학습 데이터로 예측 결과를 만들기 때문에 리더보드에 사용할 수 없는 출력파일을 얻게 됩니다.
+
 ```bash
 # ODQA 실행 (test_dataset 사용)
-# wandb 가 로그인 되어있다면 자동으로 결과가 wandb 에 저장됩니다. 아니면 단순히 출력됩니다
-python inference.py --output_dir ./outputs/test_dataset/ --dataset_name ../data/test_dataset/ --model_name_or_path ./models/train_dataset/ --do_predict
+python inference.py 
+```
+```json
+// args_inference.json
+{
+  "model_name_or_path": "../experiments/YYYYMMDD_hhmmss_train",
+  "data_path": "../experiments/YYYYMMDD_hhmmss_train",
+  "context_path": "../data/wikipedia_documents.json",
+  "dataset_name": "../data/test_dataset",
+  "do_predict": true
+}
 ```
 
 ### How to submit
@@ -205,3 +226,25 @@ python inference.py --output_dir ./outputs/test_dataset/ --dataset_name ../data/
 2. 모델의 경우 `--overwrite_cache` 를 추가하지 않으면 같은 폴더에 저장되지 않습니다.
 
 3. `./outputs/` 폴더 또한 `--overwrite_output_dir` 을 추가하지 않으면 같은 폴더에 저장되지 않습니다.
+
+
+## pre-commit hooks
+
+commit 할 때마다 `.pre-commit-config.yaml`에 정의한 행동을 실행해 코드의 스타일을 통일합니다. [black](https://github.com/psf/black), [isort](https://github.com/pycqa/isort) 및 [pre-defined hooks by Github](https://github.com/pre-commit/pre-commit-hooks)의 몇 가지 hooks를 사용하고 있습니다.
+
+### 요구사항
+
+- `pre-commit` 설치
+
+```bash
+$ pre-commit --version
+pre-commit 4.0.1
+$ pre-commit install
+
+```
+
+### Troubleshoot
+- pre-commit이 실행되지 않을 경우
+```bash
+$ pre-commit clean && pre-commit install && pre-commit run --all-files
+```

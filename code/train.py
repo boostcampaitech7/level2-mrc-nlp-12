@@ -10,21 +10,8 @@ import wandb
 from arguments import DataTrainingArguments, ModelArguments
 from custom_logger import CustomLogger
 from datasets import DatasetDict, load_from_disk, load_metric
-from trainer_qa import (
-    QuestionAnsweringTrainer,
-    prepare_train_features,
-    prepare_validation_features,
-)
-from transformers import (
-    AutoConfig,
-    AutoModelForQuestionAnswering,
-    AutoTokenizer,
-    DataCollatorWithPadding,
-    EvalPrediction,
-    HfArgumentParser,
-    TrainingArguments,
-    set_seed,
-)
+from trainer_qa import QuestionAnsweringTrainer
+from transformers import EvalPrediction, TrainingArguments, set_seed
 from utils import (
     check_git_status,
     create_experiment_dir,
@@ -38,6 +25,8 @@ from utils_qa import (
     check_no_error,
     post_processing_function,
     postprocess_qa_predictions,
+    prepare_train_features,
+    prepare_validation_features,
 )
 
 logger = CustomLogger(name=__name__)
@@ -47,21 +36,17 @@ def main():
     commit_id = check_git_status()
     experiment_dir = create_experiment_dir(experiment_type="train")
 
-    model_args, data_args, training_args, json_args = get_arguments(experiment_dir)
+    model_args, data_args, training_args, json_args = get_arguments(
+        experiment_dir, experiment_type="train"
+    )
     logger.set_config()
     logger.set_training_args(training_args=training_args)
 
-    set_seed(seed=training_args.seed, deterministic=training_args.deterministic)
+    set_seed(seed=training_args.seed)
 
     print(model_args.model_name_or_path)
     print(f"model is from {model_args.model_name_or_path}")
     print(f"data is from {data_args.dataset_name}")
-
-    # wandb 설정
-    wandb.init(
-        project=training_args.WANDB_PROJECT,
-        name=training_args.run_name if training_args.run_name else None,
-    )
 
     datasets = load_from_disk(data_args.dataset_name)
     print(datasets)
@@ -118,11 +103,10 @@ def run_mrc(
                 "tokenizer": tokenizer,
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
-                "training_args": training_args,
                 "data_args": data_args,
             },
         )
-    elif training_args.do_eval:
+    if training_args.do_eval:
         eval_dataset = datasets["validation"]
         column_names = datasets["validation"].column_names
 
@@ -137,7 +121,6 @@ def run_mrc(
                 "tokenizer": tokenizer,
                 "column_names": column_names,
                 "max_seq_length": max_seq_length,
-                "training_args": training_args,
                 "data_args": data_args,
             },
         )
@@ -162,6 +145,11 @@ def run_mrc(
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
+
+    # wandb 설정
+    wandb.init(project=model_args.wandb_project, dir=training_args.output_dir)
+    wandb.run.name = model_args.wandb_name
+
     # Training
     if training_args.do_train:
         if last_checkpoint is not None:
