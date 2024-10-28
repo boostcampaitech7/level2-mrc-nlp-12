@@ -12,16 +12,9 @@ from custom_logger import CustomLogger
 from datasets import DatasetDict, load_from_disk, load_metric
 from trainer_qa import (
     QuestionAnsweringTrainer,
-    prepare_train_features,
-    prepare_validation_features,
 )
 from transformers import (
-    AutoConfig,
-    AutoModelForQuestionAnswering,
-    AutoTokenizer,
-    DataCollatorWithPadding,
     EvalPrediction,
-    HfArgumentParser,
     TrainingArguments,
     set_seed,
 )
@@ -38,6 +31,8 @@ from utils_qa import (
     check_no_error,
     post_processing_function,
     postprocess_qa_predictions,
+    prepare_train_features,
+    prepare_validation_features,
 )
 
 logger = CustomLogger(name=__name__)
@@ -51,7 +46,7 @@ def main():
     logger.set_config()
     logger.set_training_args(training_args=training_args)
 
-    set_seed(seed=training_args.seed, deterministic=training_args.deterministic)
+    set_seed(seed=training_args.seed)
 
     print(model_args.model_name_or_path)
     print(f"model is from {model_args.model_name_or_path}")
@@ -59,8 +54,8 @@ def main():
 
     # wandb 설정
     wandb.init(
-        project=training_args.WANDB_PROJECT,
-        name=training_args.run_name if training_args.run_name else None,
+        project="mrc",
+        name="Check validation of krfkv2",
     )
 
     datasets = load_from_disk(data_args.dataset_name)

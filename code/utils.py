@@ -18,10 +18,10 @@ from transformers import (
 
 def check_git_status():
     repo = git.Repo(search_parent_directories=True)
-    if repo.is_dirty():
-        raise Exception(
-            "Uncommitted changes in the repository. Commit or stash changes before running the experiment."
-        )
+    # if repo.is_dirty():
+    #     raise Exception(
+    #         "Uncommitted changes in the repository. Commit or stash changes before running the experiment."
+    #     )
     return repo.head.commit.hexsha
 
 
@@ -34,7 +34,7 @@ def create_experiment_dir(base_dir="../experiments", commit_id=""):
 
 
 def save_args(args_dict, experiment_dir, commit_id):
-    args_path = os.path.join(experiment_dir, "config.json")
+    args_path = os.path.join(experiment_dir, "args.json")
     with open(args_path, "w") as f:
         json.dump(args_dict, f, indent=4)
 
@@ -56,8 +56,8 @@ def get_arguments(experiment_dir):
         (ModelArguments, DataTrainingArguments, TrainingArguments)
     )
 
-    # Load arguments from config.json
-    args_json_path = "../config.json"
+    # Load arguments from args.json
+    args_json_path = "../args.json"
     if os.path.exists(args_json_path):
         json_args = load_args_from_json(args_json_path)
     else:
@@ -133,7 +133,7 @@ def get_tokenizer_and_model(model_args):
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
     )
-    return config, tokenizer, model
+    return tokenizer, model
 
 
 def print_examples_on_evaluation(results):

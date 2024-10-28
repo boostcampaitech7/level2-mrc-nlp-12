@@ -1,16 +1,16 @@
 import logging
-
+import sys
 
 class CustomLogger:
     def __init__(self, name: str):
         self.name = name
         self.logger = logging.getLogger(name)
 
-    def set_config(self, format, datefmt, handlers):
+    def set_config(self, format="%(asctime)s - %(levelname)s - %(name)s -    %(message)s", datefmt="%m/%d/%Y %H:%M:%S", handlers=[logging.StreamHandler(sys.stdout)]):
         logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(name)s -    %(message)s",
-            datefmt="%m/%d/%Y %H:%M:%S",
-            handlers=[logging.StreamHandler(sys.stdout)],
+            format=format,
+            datefmt=datefmt,
+            handlers=handlers,
         )
 
     def set_training_args(self, training_args):
