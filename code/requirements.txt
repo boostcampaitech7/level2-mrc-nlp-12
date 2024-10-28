@@ -14,3 +14,5 @@ kiwipiepy
 wandb
 gitpython
 pre-commit
+#question generation (for t5 model)
+sentencepiece
